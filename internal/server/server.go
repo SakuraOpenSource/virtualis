@@ -95,6 +95,8 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	agentAPI := eng.Group("/api/agent", middleware.RequireInstalled(rt))
 	agentAPI.POST("/register", h.AgentRegister)
 	agentAPI.GET("/install.sh", h.AgentInstallScript)
+	agentAPI.GET("/binary", h.AgentBinary)
+	agentAPI.HEAD("/binary", h.AgentBinary)
 
 	// SPA fallback + API 404
 	frontend := gin.WrapF(web.Handler())
