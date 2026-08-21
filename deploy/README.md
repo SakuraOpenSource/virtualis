@@ -48,18 +48,19 @@ deploy\install.bat --agent
 
 ## 一键安装 QEMU/LXC/Incus/Mock 被控脚本在哪里
 
-- **被控专用**：`deploy/install-agent.sh` – 交互式选择后端后直接接入主控
+- **被控专用（已整合至 Agent）**：`virtualis-agent/install.sh` – 内置可选，交互式 5 选 1 后直接接入主控
   ```bash
-  sudo bash deploy/install-agent.sh --master http://MASTER:8080 --token <token> --name node-01
-  # 或交互式
-  sudo bash deploy/install-agent.sh
+  sudo bash virtualis-agent/install.sh --master http://MASTER:8080 --token <token> --name node-01 --mode 2
+  # 或交互式（提示 1 仅 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent / 5 Mock+Agent）
+  sudo bash virtualis-agent/install.sh
   ```
-- **通用**：`deploy/install-linux.sh --agent` / `install-macos.sh --agent` / `install.bat --agent` 均支持 `Mock/QEMU/LXC/Incus` 多选，内部复用同一后端安装逻辑
+  可选择：`1 仅安装 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent / 5 Mock+Agent`
+- **通用**：`deploy/install-linux.sh --agent` / `install-macos.sh --agent` / `install.bat --agent` 仍支持多选 `Mock/QEMU/LXC/Incus`，内部复用同一后端安装逻辑
 - 主控也可在 `deploy/install-linux.sh` 直接选后端一并安装
 
 ## 目录
 
 - `install-linux.sh` – Linux 主控/被控通用（apt/dnf/yum/pacman/apk）
-- `install-agent.sh` – Linux 被控专用一键（含 QEMU/LXC/Incus/Mock 选择）
+- `virtualis-agent/install.sh` – Linux 被控专用一键（内置 1 仅Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent / 5 Mock+Agent）
 - `install-macos.sh` – macOS 主控/被控（Homebrew）
 - `install.bat` – Windows 主控/被控（winget/choco，QEMU/Mock；LXC/Incus 提示 WSL2）
