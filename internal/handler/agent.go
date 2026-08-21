@@ -89,9 +89,9 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 }
 
 func (h *Handler) AgentInstallScript(c *gin.Context) {
-	// 生成兼容两种调用方式的脚本：
+	// 生成兼容两种调用方式的脚本，并内置 5 选 1 后端安装：
 	// 1) curl http://master/api/agent/install.sh?master=...&token=... | bash
-	// 2) curl http://master/api/agent/install.sh | bash -s -- --master ... --token ...
+	// 2) curl http://master/api/agent/install.sh | bash -s -- --master ... --token ... [--mode 1-5] [--name node-01]
 	qMaster := c.Query("master")
 	qToken := c.Query("token")
 	if qMaster == "" {
@@ -104,25 +104,51 @@ func (h *Handler) AgentInstallScript(c *gin.Context) {
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.String(http.StatusOK, `#!/usr/bin/env bash
 set -e
-# 支持两种传参：查询串嵌入（兼容）与 bash -s -- --master/--token
+# 支持两种传参：查询串嵌入（兼容）与 bash -s -- --master/--token/--mode
 MASTER="%s"
 TOKEN="%s"
-# 解析 bash 传入的 --master/--token
+MODE=""
+NAME=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --master) MASTER="$2"; shift 2;;
     --token) TOKEN="$2"; shift 2;;
     --name) NAME="$2"; shift 2;;
+    --mode) MODE="$2"; shift 2;;
     *) shift;;
   esac
 done
 if [[ -z "$MASTER" || -z "$TOKEN" ]]; then
-  echo "用法: $0 --master http://MASTER:8080 --token <token> [--name node-01]"
+  echo "用法: $0 --master http://MASTER:8080 --token <token> [--name node-01] [--mode 1-5]"
   echo "或: curl http://MASTER/api/agent/install.sh?master=...&token=... | bash"
+  echo "可选择: 1 仅安装 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent / 5 Mock+Agent"
   exit 1
 fi
 NAME=${NAME:-node-$(hostname)}
-echo "Joining $MASTER as $NAME ..."
+if [[ -z "$MODE" ]]; then
+  echo ""
+  echo "可选择："
+  echo "  1) 仅安装 Agent"
+  echo "  2) 安装 Incus+Agent"
+  echo "  3) 安装 LXC+Agent"
+  echo "  4) 安装 QEMU+Agent"
+  echo "  5) 安装 Mock+Agent"
+  if [ -t 0 ]; then
+    read -p "选择 [1]: " MODE
+  else
+    read -p "选择 [1]: " MODE < /dev/tty || MODE=1
+  fi
+  MODE=${MODE:-1}
+fi
+echo "Joining $MASTER as $NAME (模式 $MODE) ..."
+case "$MODE" in
+  1) echo "仅安装 Agent，跳过后端安装" ;;
+  2) echo "安装 Incus..."; if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y incus 2>/dev/null || true; elif command -v dnf >/dev/null 2>&1; then dnf install -y incus 2>/dev/null || true; elif command -v yum >/dev/null 2>&1; then yum install -y incus 2>/dev/null || true; else echo "请手动安装 incus"; fi ;;
+  3) echo "安装 LXC..."; if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y lxc lxc-templates 2>/dev/null || true; elif command -v dnf >/dev/null 2>&1; then dnf install -y lxc lxc-templates 2>/dev/null || true; elif command -v yum >/dev/null 2>&1; then yum install -y lxc lxc-templates 2>/dev/null || true; else echo "请手动安装 lxc"; fi ;;
+  4) echo "安装 QEMU..."; if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y qemu-kvm qemu-utils libvirt-clients 2>/dev/null || true; elif command -v dnf >/dev/null 2>&1; then dnf install -y qemu-kvm qemu-img 2>/dev/null || true; elif command -v yum >/dev/null 2>&1; then yum install -y qemu-kvm qemu-img 2>/dev/null || true; else echo "请手动安装 qemu-kvm"; fi ;;
+  5) echo "安装 Mock+Agent (Mock 无需额外依赖)" ;;
+  *) echo "未知模式 $MODE，按 1 仅 Agent 处理" ;;
+esac
 # 优先使用已存在的二进制，否则尝试从主控下载，其次从 GitHub
 BIN="/tmp/virtualis-agent"
 if [[ -x "./virtualis-agent" ]]; then BIN="./virtualis-agent"; fi
