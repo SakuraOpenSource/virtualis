@@ -46,8 +46,20 @@ deploy\install.bat --agent
 - 主控：`virtualis -data /var/lib/virtualis` → 访问 `http://IP:8080` 完成安装
 - 被控：`virtualis-agent --master http://MASTER:8080 --token <token> --name node-01 --listen :8081`
 
+## 一键安装 QEMU/LXC/Incus/Mock 被控脚本在哪里
+
+- **被控专用**：`deploy/install-agent.sh` – 交互式选择后端后直接接入主控
+  ```bash
+  sudo bash deploy/install-agent.sh --master http://MASTER:8080 --token <token> --name node-01
+  # 或交互式
+  sudo bash deploy/install-agent.sh
+  ```
+- **通用**：`deploy/install-linux.sh --agent` / `install-macos.sh --agent` / `install.bat --agent` 均支持 `Mock/QEMU/LXC/Incus` 多选，内部复用同一后端安装逻辑
+- 主控也可在 `deploy/install-linux.sh` 直接选后端一并安装
+
 ## 目录
 
-- `install-linux.sh` – Linux (apt/dnf/yum/pacman/apk)
-- `install-macos.sh` – macOS (Homebrew)
-- `install.bat` – Windows (winget/choco)
+- `install-linux.sh` – Linux 主控/被控通用（apt/dnf/yum/pacman/apk）
+- `install-agent.sh` – Linux 被控专用一键（含 QEMU/LXC/Incus/Mock 选择）
+- `install-macos.sh` – macOS 主控/被控（Homebrew）
+- `install.bat` – Windows 主控/被控（winget/choco，QEMU/Mock；LXC/Incus 提示 WSL2）
