@@ -91,9 +91,10 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	admin.POST("/agents", h.CreateAgent)
 	admin.DELETE("/agents/:id", h.DeleteAgent)
 
-	// Agent self-registration (no auth, token-based)
-	secured.POST("/agent/register", h.AgentRegister)
-	secured.GET("/agent/install.sh", h.AgentInstallScript)
+	// Agent self-registration (no CSRF, token-based) - must be outside CSRF group
+	agentAPI := eng.Group("/api/agent", middleware.RequireInstalled(rt))
+	agentAPI.POST("/register", h.AgentRegister)
+	agentAPI.GET("/install.sh", h.AgentInstallScript)
 
 	// SPA fallback + API 404
 	frontend := gin.WrapF(web.Handler())

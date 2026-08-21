@@ -89,24 +89,57 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 }
 
 func (h *Handler) AgentInstallScript(c *gin.Context) {
-	// 返回一个可直接执行的 bash 安装脚本，内含 master 与 token
-	master := c.Query("master")
-	token := c.Query("token")
-	if master == "" {
+	// 生成兼容两种调用方式的脚本：
+	// 1) curl http://master/api/agent/install.sh?master=...&token=... | bash
+	// 2) curl http://master/api/agent/install.sh | bash -s -- --master ... --token ...
+	qMaster := c.Query("master")
+	qToken := c.Query("token")
+	if qMaster == "" {
 		scheme := "http"
-		if c.Request.TLS != nil {
+		if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
 			scheme = "https"
 		}
-		master = scheme + "://" + c.Request.Host
+		qMaster = scheme + "://" + c.Request.Host
 	}
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.String(http.StatusOK, `#!/usr/bin/env bash
 set -e
+# 支持两种传参：查询串嵌入（兼容）与 bash -s -- --master/--token
 MASTER="%s"
 TOKEN="%s"
-echo "Joining $MASTER ..."
-curl -L -o /tmp/virtualis-agent https://github.com/SakuraOpenSource/virtualis/releases/latest/download/virtualis-agent-linux-amd64
-chmod +x /tmp/virtualis-agent
-sudo /tmp/virtualis-agent --master "$MASTER" --token "$TOKEN" --name "node-$(hostname)"
-`, master, token)
+# 解析 bash 传入的 --master/--token
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --master) MASTER="$2"; shift 2;;
+    --token) TOKEN="$2"; shift 2;;
+    --name) NAME="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+if [[ -z "$MASTER" || -z "$TOKEN" ]]; then
+  echo "用法: $0 --master http://MASTER:8080 --token <token> [--name node-01]"
+  echo "或: curl http://MASTER/api/agent/install.sh?master=...&token=... | bash"
+  exit 1
+fi
+NAME=${NAME:-node-$(hostname)}
+echo "Joining $MASTER as $NAME ..."
+# 优先使用已存在的二进制，否则尝试从主控下载，其次从 GitHub
+BIN="/tmp/virtualis-agent"
+if [[ -x "./virtualis-agent" ]]; then BIN="./virtualis-agent"; fi
+if [[ -x "./va" ]]; then BIN="./va"; fi
+if [[ ! -x "$BIN" ]]; then
+  echo "尝试从主控下载 agent 二进制..."
+  if ! curl -fsSL "$MASTER/api/agent/binary" -o "$BIN" 2>/dev/null; then
+    echo "主控未提供二进制，尝试 GitHub Releases..."
+    curl -L -o "$BIN" "https://github.com/SakuraOpenSource/virtualis/releases/latest/download/virtualis-agent-linux-amd64" || true
+  fi
+  chmod +x "$BIN" 2>/dev/null || true
+fi
+if [[ ! -x "$BIN" ]]; then
+  echo "未找到可执行的 virtualis-agent，请先在被控下载或构建："
+  echo "  CGO_ENABLED=0 go build -o /tmp/virtualis-agent ./cmd/agent"
+  exit 1
+fi
+exec sudo "$BIN" --master "$MASTER" --token "$TOKEN" --name "$NAME"
+`, qMaster, qToken)
 }
