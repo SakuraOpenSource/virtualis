@@ -40,6 +40,8 @@ NO_START=0
 FORCE=0
 DEBUG=0
 UPDATE=0
+GH_PROXY=""
+GH_PROXY_SET=0
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -64,6 +66,9 @@ Virtualis Linux 安装/升级脚本
   --source auto|release|local
   --backend LIST             mock,qemu,lxc,incus，逗号或空格分隔
   --update                   只升级已安装角色并保留现有配置
+  --gh-proxy URL             GitHub 代理，例如 https://gh-proxy.org
+                             下载时拼接为 URL/https://github.com/...
+                             传 none 表示禁用代理且不再询问
   --no-start                 安装后不启动/重启 systemd 服务
   --force                    允许覆盖不存在的旧服务配置
   --debug                    显示更多下载/包管理信息
@@ -104,6 +109,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --update) SOURCE="release"; UPDATE=1; shift;;
+    --gh-proxy) GH_PROXY="${2:-}"; GH_PROXY_SET=1; shift 2;;
     --no-start) NO_START=1; shift;;
     --force) FORCE=1; shift;;
     --debug) DEBUG=1; shift;;
@@ -160,6 +166,19 @@ else
   BACKENDS="$(printf '%s' "$BACKENDS" | tr ',' ' ' | xargs)"
   [[ -n "$BACKENDS" ]] || BACKENDS="mock"
 fi
+
+# GitHub 代理：交互询问 + 归一化校验
+if [[ "$GH_PROXY_SET" -eq 0 && -z "$GH_PROXY" ]]; then
+  echo "是否启用 GitHub 代理加速下载？"
+  read -r -p "输入代理地址（例如 https://gh-proxy.org，回车跳过）: " GH_PROXY < /dev/tty || GH_PROXY=""
+fi
+GH_PROXY="$(printf '%s' "$GH_PROXY" | tr -d '\r\n' | xargs)"
+case "$GH_PROXY" in
+  ""|none|off|no) GH_PROXY="";;
+  http://*|https://*) GH_PROXY="${GH_PROXY%/}";;
+  *) die "GitHub 代理必须以 http:// 或 https:// 开头，例如 https://gh-proxy.org";;
+esac
+[[ -n "$GH_PROXY" ]] && info "已启用 GitHub 代理: $GH_PROXY"
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
@@ -246,6 +265,10 @@ download() {
   local url="$1" output="$2"
   url="$(printf '%s' "$url" | tr -d '\r\n' | xargs)"
   [[ -n "$url" ]] || die "下载地址为空，请检查 VERSION/GITHUB_REPO 参数"
+  # 通过 GitHub 代理下载时，拼接为 https://proxy/https://github.com/...
+  if [[ -n "$GH_PROXY" && "$url" == *"github.com"* ]]; then
+    url="${GH_PROXY}/${url}"
+  fi
   if [[ "$DEBUG" -eq 1 ]]; then info "下载 $url"; fi
   if command_exists curl; then
     curl --fail --location --silent --show-error "$url" -o "$output" || die "下载失败: $url (请检查网络或该版本是否存在 Release 产物)"

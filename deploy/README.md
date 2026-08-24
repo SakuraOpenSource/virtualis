@@ -24,6 +24,12 @@ sudo bash deploy/install-virtualis.sh \
 # 已安装节点升级，保留现有 systemd 参数
 sudo bash deploy/install-virtualis.sh --role master --update
 sudo bash deploy/install-virtualis.sh --role agent --update
+
+# 使用 GitHub 代理加速（可选）
+# 交互式会询问代理地址；也可通过参数指定，不需要则回车跳过或传 none
+sudo bash deploy/install-virtualis.sh --role master --gh-proxy https://gh-proxy.org
+sudo bash deploy/install-virtualis.sh --role agent --master http://MASTER_IP:8080 --token TOKEN --name node-01 --gh-proxy https://gh-proxy.org
+# 实际下载地址会变为 https://gh-proxy.org/https://github.com/SakuraOpenSource/virtualis/releases/...
 ```
 
 服务名分别为 `virtualis.service` 和 `virtualis-agent.service`。二进制分别位于 `/opt/virtualis/virtualis` 与 `/opt/virtualis-agent/virtualis-agent`，数据目录分别为 `/var/lib/virtualis` 与 `/var/lib/virtualis-agent`。
