@@ -126,30 +126,35 @@ if [[ -z "$ROLE" ]]; then
 fi
 [[ "$ROLE" == "master" || "$ROLE" == "agent" ]] || die "--role 必须是 master 或 agent"
 
-if [[ -z "$BACKENDS" ]]; then
-  if [[ "$UPDATE" -eq 1 ]]; then
-    BACKENDS="mock"
-  else
-    echo "请选择虚拟化后端（可多选，空格分隔；回车默认 Mock）："
-    echo "  1) Mock"
-    echo "  2) QEMU/libvirt"
-    echo "  3) LXC"
-    echo "  4) Incus"
-    read -r -p "选择 [1]: " backend_choice < /dev/tty || backend_choice=1
-    backend_choice="${backend_choice:-1}"
-    for item in $backend_choice; do
-      case "$item" in
-        1) BACKENDS+=" mock";;
-        2) BACKENDS+=" qemu";;
-        3) BACKENDS+=" lxc";;
-        4) BACKENDS+=" incus";;
-        *) die "未知后端选项: $item";;
-      esac
-    done
+if [[ "$ROLE" == "master" ]]; then
+  # 主控无需安装虚拟化后端，实例均在被控创建
+  BACKENDS=""
+else
+  if [[ -z "$BACKENDS" ]]; then
+    if [[ "$UPDATE" -eq 1 ]]; then
+      BACKENDS="mock"
+    else
+      echo "请选择虚拟化后端（可多选，空格分隔；回车默认 Mock）："
+      echo "  1) Mock"
+      echo "  2) QEMU/libvirt"
+      echo "  3) LXC"
+      echo "  4) Incus"
+      read -r -p "选择 [1]: " backend_choice < /dev/tty || backend_choice=1
+      backend_choice="${backend_choice:-1}"
+      for item in $backend_choice; do
+        case "$item" in
+          1) BACKENDS+=" mock";;
+          2) BACKENDS+=" qemu";;
+          3) BACKENDS+=" lxc";;
+          4) BACKENDS+=" incus";;
+          *) die "未知后端选项: $item";;
+        esac
+      done
+    fi
   fi
+  BACKENDS="$(printf '%s' "$BACKENDS" | tr ',' ' ' | xargs)"
+  [[ -n "$BACKENDS" ]] || BACKENDS="mock"
 fi
-BACKENDS="$(printf '%s' "$BACKENDS" | tr ',' ' ' | xargs)"
-[[ -n "$BACKENDS" ]] || BACKENDS="mock"
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
@@ -216,35 +221,47 @@ install_backend() {
   esac
 }
 
-for backend in $BACKENDS; do install_backend "$backend"; done
+if [[ "$ROLE" == "agent" ]]; then
+  for backend in $BACKENDS; do install_backend "$backend"; done
+else
+  info "主控无需安装虚拟化后端"
+fi
 
 arch_name() {
-  case "$(uname -m)" in
+  local machine
+  machine="$(uname -m 2>/dev/null | tr -d '\r\n' | xargs)"
+  case "$machine" in
     x86_64|amd64) echo amd64;;
     aarch64|arm64) echo arm64;;
-    *) die "不支持的 CPU 架构: $(uname -m)";;
+    *) die "不支持的 CPU 架构: $machine";;
   esac
 }
 
 download() {
   local url="$1" output="$2"
+  url="$(printf '%s' "$url" | tr -d '\r\n' | xargs)"
+  [[ -n "$url" ]] || die "下载地址为空，请检查 VERSION/GITHUB_REPO 参数"
   if [[ "$DEBUG" -eq 1 ]]; then info "下载 $url"; fi
   if command_exists curl; then
-    curl --fail --location --silent --show-error "$url" -o "$output"
+    curl --fail --location --silent --show-error "$url" -o "$output" || die "下载失败: $url (请检查网络或该版本是否存在 Release 产物)"
   elif command_exists wget; then
-    wget --quiet --output-document="$output" "$url"
+    wget --quiet --output-document="$output" "$url" || die "下载失败: $url"
   else
     die "需要 curl 或 wget"
   fi
+  [[ -s "$output" ]] || die "下载得到空文件: $url"
 }
 
 binary_from_release() {
-  local name="$1" output="$2" arch
+  local name="$1" output="$2" arch version repo
   arch="$(arch_name)"
-  if [[ "$VERSION" == "latest" ]]; then
-    download "https://github.com/$GITHUB_REPO/releases/latest/download/$name-linux-$arch" "$output"
+  version="$(printf '%s' "$VERSION" | tr -d '\r\n' | xargs)"
+  repo="$(printf '%s' "$GITHUB_REPO" | tr -d '\r\n' | xargs)"
+  [[ -n "$arch" && -n "$version" && -n "$repo" ]] || die "下载参数异常: version=$version repo=$repo arch=$arch"
+  if [[ "$version" == "latest" ]]; then
+    download "https://github.com/$repo/releases/latest/download/$name-linux-$arch" "$output"
   else
-    download "https://github.com/$GITHUB_REPO/releases/download/$VERSION/$name-linux-$arch" "$output"
+    download "https://github.com/$repo/releases/download/$version/$name-linux-$arch" "$output"
   fi
 }
 
@@ -267,15 +284,24 @@ install_master_agent_packages() {
   mkdir -p "$MASTER_AGENT_PACKAGES"
   if [[ "$SOURCE" != "release" && -d "$REPO_ROOT/agent-packages" ]]; then
     find "$REPO_ROOT/agent-packages" -maxdepth 1 -type f -name 'virtualis-agent-*' -exec install -m 0755 {} "$MASTER_AGENT_PACKAGES/" \;
+    # 兼容部分旧构建脚本未同步到 agent-packages 的情况
+    if [[ ! -f "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-amd64" && -f "$REPO_ROOT/bin/virtualis-agent-linux-amd64" ]]; then
+      install -m 0755 "$REPO_ROOT/bin/virtualis-agent-linux-amd64" "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-amd64"
+    fi
+    if [[ ! -f "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-arm64" && -f "$REPO_ROOT/bin/virtualis-agent-linux-arm64" ]]; then
+      install -m 0755 "$REPO_ROOT/bin/virtualis-agent-linux-arm64" "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-arm64"
+    fi
     return
   fi
-  local package_arch package_tmp
+  local package_arch package_tmp repo version
+  repo="$(printf '%s' "$GITHUB_REPO" | tr -d '\r\n' | xargs)"
+  version="$(printf '%s' "$VERSION" | tr -d '\r\n' | xargs)"
   for package_arch in amd64 arm64; do
     package_tmp="$(mktemp)"
-    if [[ "$VERSION" == "latest" ]]; then
-      download "https://github.com/$GITHUB_REPO/releases/latest/download/virtualis-agent-linux-$package_arch" "$package_tmp"
+    if [[ "$version" == "latest" ]]; then
+      download "https://github.com/$repo/releases/latest/download/virtualis-agent-linux-$package_arch" "$package_tmp"
     else
-      download "https://github.com/$GITHUB_REPO/releases/download/$VERSION/virtualis-agent-linux-$package_arch" "$package_tmp"
+      download "https://github.com/$repo/releases/download/$version/virtualis-agent-linux-$package_arch" "$package_tmp"
     fi
     install -m 0755 "$package_tmp" "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-$package_arch"
     rm -f "$package_tmp"
@@ -409,11 +435,19 @@ else
   install_agent
 fi
 
+# 主控无需后端，展示更清晰
+display_backend="$BACKENDS"
+if [[ "$ROLE" == "master" ]]; then
+  display_backend="无需（实例在被控创建）"
+elif [[ -z "$display_backend" ]]; then
+  display_backend="mock"
+fi
+
 cat <<EOF
 
 Virtualis 安装/升级完成
 角色: $ROLE
-后端: $BACKENDS
+后端: $display_backend
 主控目录: $MASTER_DIR
 被控目录: $AGENT_DIR
 EOF
