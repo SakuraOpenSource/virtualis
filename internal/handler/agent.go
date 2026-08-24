@@ -94,7 +94,7 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 	if req.IP == "" {
 		req.IP = c.ClientIP()
 	}
-	if err := h.agents().Heartbeat(agent, req.IP, req.Endpoint, req.Driver, req.OS, req.Arch, req.Version, req.Drivers); err != nil {
+	if err := h.agents().Heartbeat(agent, token, req.IP, req.Endpoint, req.Driver, req.OS, req.Arch, req.Version, req.Drivers); err != nil {
 		respond(c, nil, err)
 		return
 	}
@@ -134,6 +134,7 @@ func (h *Handler) AgentBinary(c *gin.Context) {
 	candidates := []string{
 		filepath.Join("agent-packages", filename),
 		filepath.Join("bin", filename),
+		filepath.Join("/opt/virtualis", "agent-packages", filename),
 		filepath.Join(h.rt.DataDir(), "agent-packages", filename),
 		filepath.Join("..", "virtualis-agent", "bin", filename),
 		filepath.Join("/usr/local/share/virtualis/agent-packages", filename),
@@ -209,6 +210,7 @@ while [[ $# -gt 0 ]]; do
     --advertise) ADVERTISE="${2:-}"; shift 2;;
     *) shift;;
   esac
+done
 
 if [[ -z "$MASTER" || -z "$TOKEN" ]]; then
   echo "用法: $0 --master http://MASTER:8080 --token TOKEN [--name node-01] [--mode 1-5]"

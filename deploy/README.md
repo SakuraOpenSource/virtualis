@@ -4,6 +4,30 @@
 
 ## 快速开始
 
+### 统一 Linux 安装/升级脚本
+
+`install-virtualis.sh` 安装到固定目录 `/opt/virtualis` 和 `/opt/virtualis-agent`，并创建/更新 systemd 服务：
+
+```bash
+# 主控
+sudo bash deploy/install-virtualis.sh --role master --backend qemu,incus
+
+# 被控首次安装
+sudo bash deploy/install-virtualis.sh \
+  --role agent \
+  --master http://MASTER_IP:8080 \
+  --token JOIN_TOKEN \
+  --name node-01 \
+  --advertise http://AGENT_IP:8081 \
+  --backend qemu,incus
+
+# 已安装节点升级，保留现有 systemd 参数
+sudo bash deploy/install-virtualis.sh --role master --update
+sudo bash deploy/install-virtualis.sh --role agent --update
+```
+
+服务名分别为 `virtualis.service` 和 `virtualis-agent.service`。二进制分别位于 `/opt/virtualis/virtualis` 与 `/opt/virtualis-agent/virtualis-agent`，数据目录分别为 `/var/lib/virtualis` 与 `/var/lib/virtualis-agent`。
+
 ### Linux
 ```bash
 sudo bash deploy/install-linux.sh          # 主控

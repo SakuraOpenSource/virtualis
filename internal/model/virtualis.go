@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 )
 
 const (
@@ -59,23 +61,90 @@ type InstanceSpec struct {
 	Arch     string `json:"arch,omitempty"`
 }
 
+type NetworkConfig struct {
+	Mode          string   `json:"mode"`
+	Bridge        string   `json:"bridge,omitempty"`
+	MAC           string   `json:"mac,omitempty"`
+	IPv4          string   `json:"ipv4,omitempty"`
+	Gateway       string   `json:"gateway,omitempty"`
+	DNS           []string `json:"dns,omitempty"`
+	BandwidthMbps int      `json:"bandwidth_mbps,omitempty"`
+}
+
+func NormalizeNetworkConfig(network NetworkConfig) (NetworkConfig, error) {
+	network.Mode = strings.ToLower(strings.TrimSpace(network.Mode))
+	if network.Mode == "" {
+		network.Mode = "nat"
+	}
+	if network.Mode != "nat" && network.Mode != "bridge" && network.Mode != "none" {
+		return network, errors.New("网络模式必须是 nat、bridge 或 none")
+	}
+	network.Bridge = strings.TrimSpace(network.Bridge)
+	if len(network.Bridge) > 64 || strings.IndexFunc(network.Bridge, func(r rune) bool {
+		return !(r == '-' || r == '_' || r == '.' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))
+	}) >= 0 {
+		return network, errors.New("网桥名称格式无效")
+	}
+	if network.Mode == "bridge" && network.Bridge == "" {
+		return network, errors.New("桥接网络必须填写网桥名称")
+	}
+	if network.MAC != "" {
+		mac, err := net.ParseMAC(network.MAC)
+		if err != nil || len(mac) != 6 {
+			return network, errors.New("MAC 地址格式无效")
+		}
+		network.MAC = strings.ToLower(mac.String())
+	}
+	if network.IPv4 != "" {
+		if ip, _, err := net.ParseCIDR(network.IPv4); err == nil {
+			if ip.To4() == nil {
+				return network, errors.New("IPv4 地址格式无效")
+			}
+		} else if ip := net.ParseIP(network.IPv4); ip == nil || ip.To4() == nil {
+			return network, errors.New("IPv4 地址格式无效")
+		}
+	}
+	if network.Gateway != "" {
+		ip := net.ParseIP(network.Gateway)
+		if ip == nil || ip.To4() == nil {
+			return network, errors.New("网关地址格式无效")
+		}
+	}
+	if len(network.DNS) > 4 {
+		return network, errors.New("DNS 最多填写 4 个地址")
+	}
+	for i, dns := range network.DNS {
+		dns = strings.TrimSpace(dns)
+		ip := net.ParseIP(dns)
+		if ip == nil {
+			return network, errors.New("DNS 地址格式无效")
+		}
+		network.DNS[i] = ip.String()
+	}
+	if network.BandwidthMbps < 0 || network.BandwidthMbps > 100000 {
+		return network, errors.New("带宽需在 0-100000 Mbps 之间")
+	}
+	return network, nil
+}
+
 type Instance struct {
 	Base
-	Name        string       `gorm:"uniqueIndex;size:64;not null" json:"name"`
-	DisplayName string       `gorm:"size:128" json:"display_name"`
-	Driver      string       `gorm:"size:16;not null;default:mock" json:"driver"`
-	Type        string       `gorm:"size:16;not null;default:container" json:"type"`
-	Status      string       `gorm:"size:16;not null;default:pending" json:"status"`
-	ImageID     *uint        `gorm:"index" json:"image_id"`
-	ImageName   string       `gorm:"size:128" json:"image_name"`
-	Spec        InstanceSpec `gorm:"type:text;serializer:json" json:"spec"`
-	IP          string       `gorm:"size:64" json:"ip"`
-	ConfigJSON  string       `gorm:"type:text" json:"config_json"`
-	OwnerID     *uint        `gorm:"index" json:"owner_id"`
-	Owner       *User        `gorm:"foreignKey:OwnerID" json:"owner,omitempty"`
-	Image       *Image       `gorm:"foreignKey:ImageID" json:"image,omitempty"`
-	AgentID     *uint        `gorm:"index" json:"agent_id"`
-	Agent       *Agent       `gorm:"foreignKey:AgentID" json:"agent,omitempty"`
+	Name        string        `gorm:"uniqueIndex;size:64;not null" json:"name"`
+	DisplayName string        `gorm:"size:128" json:"display_name"`
+	Driver      string        `gorm:"size:16;not null;default:mock" json:"driver"`
+	Type        string        `gorm:"size:16;not null;default:container" json:"type"`
+	Status      string        `gorm:"size:16;not null;default:pending" json:"status"`
+	ImageID     *uint         `gorm:"index" json:"image_id"`
+	ImageName   string        `gorm:"size:128" json:"image_name"`
+	Spec        InstanceSpec  `gorm:"type:text;serializer:json" json:"spec"`
+	Network     NetworkConfig `gorm:"type:text;serializer:json" json:"network"`
+	IP          string        `gorm:"size:64" json:"ip"`
+	ConfigJSON  string        `gorm:"type:text" json:"config_json"`
+	OwnerID     *uint         `gorm:"index" json:"owner_id"`
+	Owner       *User         `gorm:"foreignKey:OwnerID" json:"owner,omitempty"`
+	Image       *Image        `gorm:"foreignKey:ImageID" json:"image,omitempty"`
+	AgentID     *uint         `gorm:"index" json:"agent_id"`
+	Agent       *Agent        `gorm:"foreignKey:AgentID" json:"agent,omitempty"`
 }
 
 type Image struct {

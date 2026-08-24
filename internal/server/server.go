@@ -71,6 +71,10 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	authed.DELETE("/instances/:id", h.DeleteInstance)
 	authed.POST("/instances/:id/power", h.InstancePower)
 	authed.GET("/instances/:id/status", h.InstanceStatus)
+	authed.GET("/instances/:id/metrics", h.InstanceMetrics)
+	authed.GET("/instances/:id/network", h.InstanceNetwork)
+	authed.GET("/instances/:id/vnc", h.InstanceVNC)
+	authed.GET("/instances/:id/vnc/ws", h.InstanceVNCWebSocket)
 
 	// Images: read requires auth, write requires admin
 	authed.GET("/images", h.Images)

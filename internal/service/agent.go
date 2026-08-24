@@ -96,7 +96,7 @@ func (s *AgentService) Authenticate(token string) (*model.Agent, error) {
 }
 
 // Heartbeat updates the endpoint and capabilities used by the master for RPC.
-func (s *AgentService) Heartbeat(agent *model.Agent, ip, endpoint, primaryDriver, osName, arch, version string, drivers []string) error {
+func (s *AgentService) Heartbeat(agent *model.Agent, token, ip, endpoint, primaryDriver, osName, arch, version string, drivers []string) error {
 	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	if endpoint != "" {
 		u, err := url.Parse(endpoint)
@@ -109,7 +109,7 @@ func (s *AgentService) Heartbeat(agent *model.Agent, ip, endpoint, primaryDriver
 		primaryDriver = driverList[0]
 	}
 	now := time.Now().UTC()
-	return s.db.Model(agent).Updates(map[string]any{
+	updates := map[string]any{
 		"status":       model.AgentStatusOnline,
 		"ip":           strings.TrimSpace(ip),
 		"endpoint":     endpoint,
@@ -119,7 +119,13 @@ func (s *AgentService) Heartbeat(agent *model.Agent, ip, endpoint, primaryDriver
 		"arch":         strings.TrimSpace(arch),
 		"version":      strings.TrimSpace(version),
 		"last_seen_at": now,
-	}).Error
+	}
+	// Older agent rows only stored a hash. A successful authenticated heartbeat
+	// lets the master upgrade that row so it can call the agent back for RPC.
+	if strings.TrimSpace(token) != "" {
+		updates["token"] = strings.TrimSpace(token)
+	}
+	return s.db.Model(agent).Updates(updates).Error
 }
 
 func normalizeDrivers(drivers []string) model.StringList {

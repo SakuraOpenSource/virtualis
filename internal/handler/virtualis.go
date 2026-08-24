@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 
@@ -131,6 +134,79 @@ func (h *Handler) InstanceStatus(c *gin.Context) {
 	}
 	item, err := h.virtualis().RefreshStatus(c.Request.Context(), id)
 	respond(c, item, err)
+}
+
+func (h *Handler) InstanceMetrics(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	metrics, err := h.virtualis().InstanceMetrics(c.Request.Context(), id)
+	respond(c, gin.H{"metrics": metrics}, err)
+}
+
+func (h *Handler) InstanceNetwork(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	network, err := h.virtualis().InstanceNetwork(c.Request.Context(), id)
+	respond(c, gin.H{"network": network}, err)
+}
+
+func (h *Handler) InstanceVNC(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	vnc, err := h.virtualis().InstanceVNC(c.Request.Context(), id)
+	if err == nil && vnc.Available {
+		scheme := "ws"
+		if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
+			scheme = "wss"
+		}
+		vnc.WebURL = scheme + "://" + c.Request.Host + "/api/instances/" + c.Param("id") + "/vnc/ws"
+	}
+	respond(c, gin.H{"vnc": vnc}, err)
+}
+
+// InstanceVNCWebSocket proxies the browser's noVNC WebSocket to the assigned
+// agent. The agent token is injected server-side and never exposed to Vue.
+func (h *Handler) InstanceVNCWebSocket(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	instance, err := h.virtualis().GetInstance(id)
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	if instance.Agent == nil || instance.Agent.Endpoint == "" || instance.Agent.Token == "" {
+		Conflict(c, "被控节点没有可用的 VNC 连接")
+		return
+	}
+	target, err := url.Parse(instance.Agent.Endpoint)
+	if err != nil || target.Host == "" {
+		Internal(c, "被控 endpoint 无效")
+		return
+	}
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.URL.Path = "/api/instances/" + c.Param("id") + "/vnc/ws"
+			req.URL.RawPath = ""
+			query := req.URL.Query()
+			query.Set("token", instance.Agent.Token)
+			query.Set("name", instance.Name)
+			query.Set("driver", instance.Driver)
+			req.URL.RawQuery = query.Encode()
+			req.Host = target.Host
+			req.Header.Set("X-Agent-Token", instance.Agent.Token)
+		},
+	}
+	proxy.ServeHTTP(c.Writer, c.Request)
 }
 
 // Drivers returns available virtualization drivers and their probe status.

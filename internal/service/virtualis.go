@@ -122,12 +122,13 @@ func (s *VirtualisService) GetInstance(id uint) (*model.Instance, error) {
 }
 
 type CreateInstanceRequest struct {
-	Name    string             `json:"name"`
-	Driver  string             `json:"driver"`
-	Type    string             `json:"type"`
-	Spec    model.InstanceSpec `json:"spec"`
-	ImageID *uint              `json:"image_id"`
-	AgentID *uint              `json:"agent_id"`
+	Name    string              `json:"name"`
+	Driver  string              `json:"driver"`
+	Type    string              `json:"type"`
+	Spec    model.InstanceSpec  `json:"spec"`
+	Network model.NetworkConfig `json:"network"`
+	ImageID *uint               `json:"image_id"`
+	AgentID *uint               `json:"agent_id"`
 }
 
 // CreateInstance records an instance and provisions it on the selected agent.
@@ -187,6 +188,10 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if err != nil {
 		return nil, BadRequest("%s", err.Error())
 	}
+	network, err := model.NormalizeNetworkConfig(req.Network)
+	if err != nil {
+		return nil, BadRequest("%s", err.Error())
+	}
 
 	var image *model.Image
 	if req.ImageID != nil {
@@ -207,6 +212,7 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 		Driver:  driverName,
 		Type:    normalizeInstanceType(req.Type),
 		Spec:    spec,
+		Network: network,
 		Status:  model.InstanceStatusCreating,
 		ImageID: req.ImageID,
 		AgentID: req.AgentID,
@@ -341,6 +347,51 @@ func (s *VirtualisService) RefreshStatus(ctx context.Context, id uint) (*model.I
 		return nil, err
 	}
 	return s.GetInstance(id)
+}
+
+func (s *VirtualisService) InstanceMetrics(ctx context.Context, id uint) (agentclient.Metrics, error) {
+	instance, err := s.GetInstance(id)
+	if err != nil {
+		return agentclient.Metrics{}, err
+	}
+	if instance.Agent == nil {
+		return agentclient.Metrics{}, Conflict("实例没有关联被控节点")
+	}
+	client, err := s.agentClient(instance.Agent)
+	if err != nil {
+		return agentclient.Metrics{}, err
+	}
+	return client.Metrics(ctx, toWireInstance(instance, instance.Image))
+}
+
+func (s *VirtualisService) InstanceNetwork(ctx context.Context, id uint) (agentclient.NetworkStatus, error) {
+	instance, err := s.GetInstance(id)
+	if err != nil {
+		return agentclient.NetworkStatus{}, err
+	}
+	if instance.Agent == nil {
+		return agentclient.NetworkStatus{}, Conflict("实例没有关联被控节点")
+	}
+	client, err := s.agentClient(instance.Agent)
+	if err != nil {
+		return agentclient.NetworkStatus{}, err
+	}
+	return client.Network(ctx, toWireInstance(instance, instance.Image))
+}
+
+func (s *VirtualisService) InstanceVNC(ctx context.Context, id uint) (agentclient.VNCInfo, error) {
+	instance, err := s.GetInstance(id)
+	if err != nil {
+		return agentclient.VNCInfo{}, err
+	}
+	if instance.Agent == nil {
+		return agentclient.VNCInfo{}, Conflict("实例没有关联被控节点")
+	}
+	client, err := s.agentClient(instance.Agent)
+	if err != nil {
+		return agentclient.VNCInfo{}, err
+	}
+	return client.VNC(ctx, toWireInstance(instance, instance.Image))
 }
 
 func (s *VirtualisService) agentClient(agent *model.Agent) (*agentclient.Client, error) {
@@ -599,6 +650,7 @@ func toWireInstance(instance *model.Instance, image *model.Image) agentclient.In
 		Status:      instance.Status,
 		ImageID:     instance.ImageID,
 		Spec:        instance.Spec,
+		Network:     instance.Network,
 		Image:       toWireImage(image),
 	}
 }

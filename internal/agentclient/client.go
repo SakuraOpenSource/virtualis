@@ -20,15 +20,16 @@ import (
 // Instance is the small, stable wire representation shared by master and agent.
 // It deliberately excludes database associations and credentials.
 type Instance struct {
-	ID          uint               `json:"id"`
-	Name        string             `json:"name"`
-	DisplayName string             `json:"display_name,omitempty"`
-	Driver      string             `json:"driver"`
-	Type        string             `json:"type"`
-	Status      string             `json:"status,omitempty"`
-	ImageID     *uint              `json:"image_id,omitempty"`
-	Spec        model.InstanceSpec `json:"spec"`
-	Image       *Image             `json:"image,omitempty"`
+	ID          uint                `json:"id"`
+	Name        string              `json:"name"`
+	DisplayName string              `json:"display_name,omitempty"`
+	Driver      string              `json:"driver"`
+	Type        string              `json:"type"`
+	Status      string              `json:"status,omitempty"`
+	ImageID     *uint               `json:"image_id,omitempty"`
+	Spec        model.InstanceSpec  `json:"spec"`
+	Network     model.NetworkConfig `json:"network"`
+	Image       *Image              `json:"image,omitempty"`
 }
 
 // Image contains the metadata an agent needs to attach an image locally.
@@ -51,6 +52,46 @@ type Driver struct {
 	Name      string `json:"name"`
 	Available bool   `json:"available"`
 	Error     string `json:"error,omitempty"`
+}
+
+type Metrics struct {
+	CPUPercent     float64   `json:"cpu_percent"`
+	MemoryUsedMB   int64     `json:"memory_used_mb"`
+	MemoryTotalMB  int64     `json:"memory_total_mb"`
+	NetworkRxBytes uint64    `json:"network_rx_bytes"`
+	NetworkTxBytes uint64    `json:"network_tx_bytes"`
+	BandwidthRxBps float64   `json:"bandwidth_rx_bps"`
+	BandwidthTxBps float64   `json:"bandwidth_tx_bps"`
+	CollectedAt    time.Time `json:"collected_at"`
+}
+
+type NetworkInterface struct {
+	Name    string   `json:"name"`
+	MAC     string   `json:"mac,omitempty"`
+	State   string   `json:"state,omitempty"`
+	IPv4    []string `json:"ipv4,omitempty"`
+	IPv6    []string `json:"ipv6,omitempty"`
+	RxBytes uint64   `json:"rx_bytes"`
+	TxBytes uint64   `json:"tx_bytes"`
+}
+
+type NetworkStatus struct {
+	Reachable  bool               `json:"reachable"`
+	LatencyMS  float64            `json:"latency_ms"`
+	Interfaces []NetworkInterface `json:"interfaces"`
+	Error      string             `json:"error,omitempty"`
+	CheckedAt  time.Time          `json:"checked_at"`
+}
+
+type VNCInfo struct {
+	Available bool   `json:"available"`
+	Protocol  string `json:"protocol,omitempty"`
+	Host      string `json:"host,omitempty"`
+	Port      int    `json:"port,omitempty"`
+	Display   string `json:"display,omitempty"`
+	URL       string `json:"url,omitempty"`
+	WebURL    string `json:"web_url,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 type Client struct {
@@ -110,6 +151,9 @@ func (c *Client) do(req *http.Request, out any) error {
 		}
 		if msg == "" {
 			msg = resp.Status
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("被控节点版本过旧，缺少当前接口（%s），请重启最新 virtualis-agent", req.URL.Path)
 		}
 		return fmt.Errorf("被控请求失败: %s", msg)
 	}
@@ -244,6 +288,66 @@ func (c *Client) Status(ctx context.Context, instance Instance) (Instance, error
 		return Instance{}, err
 	}
 	return out.Instance, nil
+}
+
+func (c *Client) Metrics(ctx context.Context, instance Instance) (Metrics, error) {
+	payload, err := json.Marshal(struct {
+		Instance Instance `json:"instance"`
+	}{Instance: instance})
+	if err != nil {
+		return Metrics{}, err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, "instances/"+fmt.Sprint(instance.ID)+"/metrics", bytes.NewReader(payload), "application/json")
+	if err != nil {
+		return Metrics{}, err
+	}
+	var out struct {
+		Metrics Metrics `json:"metrics"`
+	}
+	if err := c.do(req, &out); err != nil {
+		return Metrics{}, err
+	}
+	return out.Metrics, nil
+}
+
+func (c *Client) Network(ctx context.Context, instance Instance) (NetworkStatus, error) {
+	payload, err := json.Marshal(struct {
+		Instance Instance `json:"instance"`
+	}{Instance: instance})
+	if err != nil {
+		return NetworkStatus{}, err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, "instances/"+fmt.Sprint(instance.ID)+"/network", bytes.NewReader(payload), "application/json")
+	if err != nil {
+		return NetworkStatus{}, err
+	}
+	var out struct {
+		Network NetworkStatus `json:"network"`
+	}
+	if err := c.do(req, &out); err != nil {
+		return NetworkStatus{}, err
+	}
+	return out.Network, nil
+}
+
+func (c *Client) VNC(ctx context.Context, instance Instance) (VNCInfo, error) {
+	payload, err := json.Marshal(struct {
+		Instance Instance `json:"instance"`
+	}{Instance: instance})
+	if err != nil {
+		return VNCInfo{}, err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, "instances/"+fmt.Sprint(instance.ID)+"/vnc", bytes.NewReader(payload), "application/json")
+	if err != nil {
+		return VNCInfo{}, err
+	}
+	var out struct {
+		VNC VNCInfo `json:"vnc"`
+	}
+	if err := c.do(req, &out); err != nil {
+		return VNCInfo{}, err
+	}
+	return out.VNC, nil
 }
 
 func multipartBody(field string, value any, fileField string, file io.Reader, filename string) (io.Reader, string, error) {
