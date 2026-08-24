@@ -26,6 +26,7 @@ AGENT_DATA="/var/lib/virtualis-agent"
 MASTER_SERVICE="virtualis.service"
 AGENT_SERVICE="virtualis-agent.service"
 GITHUB_REPO="SakuraOpenSource/virtualis"
+GITHUB_AGENT_REPO="SakuraOpenSource/virtualis-agent"
 VERSION="latest"
 ROLE=""
 BACKENDS=""
@@ -123,10 +124,12 @@ done
 # /etc/os-release 会定义 VERSION="13 (trixie)" 等变量，需避免覆盖脚本自身的 VERSION/GITHUB_REPO
 _saved_version="$VERSION"
 _saved_github_repo="$GITHUB_REPO"
+_saved_github_agent_repo="$GITHUB_AGENT_REPO"
 # shellcheck disable=SC1091
 . /etc/os-release
 VERSION="$_saved_version"
 GITHUB_REPO="$_saved_github_repo"
+GITHUB_AGENT_REPO="$_saved_github_agent_repo"
 
 if [[ -z "$ROLE" ]]; then
   echo "请选择安装角色："
@@ -284,7 +287,11 @@ binary_from_release() {
   local name="$1" output="$2" arch version repo
   arch="$(arch_name)"
   version="$(printf '%s' "$VERSION" | tr -d '\r\n' | xargs)"
-  repo="$(printf '%s' "$GITHUB_REPO" | tr -d '\r\n' | xargs)"
+  if [[ "$name" == "virtualis-agent" ]]; then
+    repo="$(printf '%s' "$GITHUB_AGENT_REPO" | tr -d '\r\n' | xargs)"
+  else
+    repo="$(printf '%s' "$GITHUB_REPO" | tr -d '\r\n' | xargs)"
+  fi
   [[ -n "$arch" && -n "$version" && -n "$repo" ]] || die "下载参数异常: version=$version repo=$repo arch=$arch"
   if [[ "$version" == "latest" ]]; then
     download "https://github.com/$repo/releases/latest/download/$name-linux-$arch" "$output"
@@ -322,7 +329,7 @@ install_master_agent_packages() {
     return
   fi
   local package_arch package_tmp repo version
-  repo="$(printf '%s' "$GITHUB_REPO" | tr -d '\r\n' | xargs)"
+  repo="$(printf '%s' "$GITHUB_AGENT_REPO" | tr -d '\r\n' | xargs)"
   version="$(printf '%s' "$VERSION" | tr -d '\r\n' | xargs)"
   for package_arch in amd64 arm64; do
     package_tmp="$(mktemp)"
