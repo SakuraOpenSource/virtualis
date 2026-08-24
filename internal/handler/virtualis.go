@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -134,23 +135,7 @@ func (h *Handler) InstanceStatus(c *gin.Context) {
 
 // Drivers returns available virtualization drivers and their probe status.
 func (h *Handler) Drivers(c *gin.Context) {
-	names := h.virtualis().DriverNames()
-	status := h.virtualis().ListDrivers(c.Request.Context())
-	// Build slice for frontend convenience.
-	type entry struct {
-		Name      string `json:"name"`
-		Available bool   `json:"available"`
-		Error     string `json:"error,omitempty"`
-	}
-	var out []entry
-	for _, n := range names {
-		e := entry{Name: n, Available: status[n] == nil}
-		if status[n] != nil {
-			e.Error = status[n].Error()
-		}
-		out = append(out, e)
-	}
-	OK(c, gin.H{"items": out})
+	OK(c, gin.H{"items": h.virtualis().ListDrivers(c.Request.Context())})
 }
 
 // Images returns all images.
@@ -181,6 +166,64 @@ func (h *Handler) CreateImage(c *gin.Context) {
 	}
 	item, err := h.virtualis().CreateImage(req)
 	respond(c, item, err)
+}
+
+// UploadImage stores an image or ISO on the master. The bytes are transferred
+// to the selected agent only when an instance is created or reinstalled.
+func (h *Handler) UploadImage(c *gin.Context) {
+	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		BadRequest(c, "invalid multipart form")
+		return
+	}
+	header, err := c.FormFile("file")
+	if err != nil {
+		BadRequest(c, "请选择镜像文件")
+		return
+	}
+	file, err := header.Open()
+	if err != nil {
+		Internal(c, "无法读取上传文件")
+		return
+	}
+	defer file.Close()
+	req := service.UploadImageRequest{
+		Name:      c.PostForm("name"),
+		Driver:    c.PostForm("driver"),
+		Type:      c.PostForm("type"),
+		OSType:    c.PostForm("os_type"),
+		OSVersion: c.PostForm("os_version"),
+		Arch:      c.PostForm("arch"),
+	}
+	item, err := h.virtualis().UploadImage(req, header.Filename, file)
+	respond(c, item, err)
+}
+
+// DownloadImage allows an administrator to verify or reuse an uploaded file.
+func (h *Handler) DownloadImage(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	image, err := h.virtualis().GetImage(id)
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	abs, err := h.storage.Path(image.FilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			NotFound(c, "image file not found")
+			return
+		}
+		Internal(c, "image file not readable")
+		return
+	}
+	name := image.OriginalName
+	if name == "" {
+		name = image.Name
+	}
+	c.Header("Content-Type", image.MimeType)
+	c.FileAttachment(abs, name)
 }
 
 // DeleteImage removes an image.

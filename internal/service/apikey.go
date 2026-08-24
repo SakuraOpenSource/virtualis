@@ -7,107 +7,140 @@ import (
 	"errors"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"gorm.io/gorm"
 
 	"github.com/SakuraOpenSource/virtualis/internal/model"
 )
 
-const apiKeyPrefix = "vls_"
-const apiKeyBytes = 16
-const maxAPIKeys = 20
-const lastUsedThrottle = time.Minute
+const (
+	apiKeyPrefix     = "lvs_"
+	apiKeyBytes      = 16
+	lastUsedThrottle = time.Minute
+)
 
-// APIKeyService manages API keys.
+// APIKeyService manages the single site-wide API key. The user id is retained
+// only as the owner required by older database schemas; it is not a scope.
 type APIKeyService struct {
 	db *gorm.DB
 }
 
-// NewAPIKeyService creates an APIKeyService.
-func NewAPIKeyService(db *gorm.DB) *APIKeyService {
-	return &APIKeyService{db: db}
-}
+func NewAPIKeyService(db *gorm.DB) *APIKeyService { return &APIKeyService{db: db} }
 
-// APIKeyCreateRequest is the input for creating a key.
+// APIKeyCreateRequest is kept wire-compatible, but name/scopes/expiry are no
+// longer user-selectable: the site key always has every permission and never
+// expires.
 type APIKeyCreateRequest struct {
 	Name      string   `json:"name"`
 	Scopes    []string `json:"scopes"`
-	ExpiresIn int      `json:"expires_in_days"` // 0 = never expire
+	ExpiresIn int      `json:"expires_in_days"`
 }
 
-// APIKeyCreated is the result of Create, containing plaintext secret once.
 type APIKeyCreated struct {
 	Key    *model.APIKey `json:"key"`
 	Secret string        `json:"secret"`
 }
 
-// Create generates a new API key.
-func (s *APIKeyService) Create(userID uint, req APIKeyCreateRequest) (*APIKeyCreated, error) {
-	name := strings.TrimSpace(req.Name)
-	if utf8.RuneCountInString(name) == 0 || utf8.RuneCountInString(name) > 64 {
-		return nil, BadRequest("name must be 1-64 characters")
-	}
-	scopes, err := normalizeScopes(req.Scopes)
-	if err != nil {
-		return nil, err
-	}
-	if req.ExpiresIn < 0 || req.ExpiresIn > 3650 {
-		return nil, BadRequest("expires_in must be 0-3650")
-	}
-	var active int64
-	if err := s.db.Model(&model.APIKey{}).Where("user_id = ? AND status = ?", userID, model.APIKeyActive).Count(&active).Error; err != nil {
-		return nil, err
-	}
-	if active >= maxAPIKeys {
-		return nil, Conflict("too many active keys (max %d)", maxAPIKeys)
-	}
+// Create creates the only active key, or rotates a previously revoked row.
+func (s *APIKeyService) Create(userID uint, _ APIKeyCreateRequest) (*APIKeyCreated, error) {
 	secret, err := GenerateSecret()
 	if err != nil {
 		return nil, err
 	}
-	var expiresAt *time.Time
-	if req.ExpiresIn > 0 {
-		t := time.Now().UTC().AddDate(0, 0, req.ExpiresIn)
-		expiresAt = &t
-	}
 	prefixLen := len(apiKeyPrefix) + 8
-	if len(secret) < prefixLen {
-		prefixLen = len(secret)
-	}
 	key := model.APIKey{
 		UserID:    userID,
-		Name:      name,
+		Name:      "Virtualis Site Key",
 		Prefix:    secret[:prefixLen],
 		KeyHash:   HashAPIKey(secret),
-		Scopes:    scopes,
+		Scopes:    model.ScopeList(model.AllScopes()),
 		Status:    model.APIKeyActive,
-		ExpiresAt: expiresAt,
+		ExpiresAt: nil,
 	}
-	if err := s.db.Create(&key).Error; err != nil {
+	var result *model.APIKey
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var keys []model.APIKey
+		if err := tx.Order("id DESC").Find(&keys).Error; err != nil {
+			return err
+		}
+		for _, existing := range keys {
+			if existing.Status == model.APIKeyActive {
+				return Conflict("站点 API 密钥已存在，请先吊销后再生成")
+			}
+			break
+		}
+		if len(keys) > 0 {
+			// Reuse the one historical row so the database never accumulates
+			// multiple site credentials.
+			existing := keys[0]
+			if err := tx.Model(&existing).Updates(map[string]any{
+				"user_id":      key.UserID,
+				"name":         key.Name,
+				"prefix":       key.Prefix,
+				"key_hash":     key.KeyHash,
+				"scopes":       key.Scopes,
+				"status":       key.Status,
+				"expires_at":   nil,
+				"last_used_at": nil,
+			}).Error; err != nil {
+				return err
+			}
+			key.ID = existing.ID
+			key.CreatedAt = existing.CreatedAt
+			result = &key
+			// Old installations may have extra rows. Revoke them so old
+			// secrets cannot continue to work.
+			for _, extra := range keys[1:] {
+				if err := tx.Model(&model.APIKey{}).Where("id = ?", extra.ID).Update("status", model.APIKeyRevoked).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := tx.Create(&key).Error; err != nil {
+			return err
+		}
+		result = &key
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	return &APIKeyCreated{Key: &key, Secret: secret}, nil
+	return &APIKeyCreated{Key: result, Secret: secret}, nil
 }
 
-// List returns all keys for a user.
+// List returns at most one row for the site and normalizes legacy rows.
 func (s *APIKeyService) List(userID uint) ([]model.APIKey, error) {
-	var items []model.APIKey
-	if err := s.db.Where("user_id = ?", userID).Order("id DESC").Find(&items).Error; err != nil {
+	var keys []model.APIKey
+	if err := s.db.Order("id DESC").Find(&keys).Error; err != nil {
 		return nil, err
 	}
-	return items, nil
+	if len(keys) == 0 {
+		return []model.APIKey{}, nil
+	}
+	keep := keys[0]
+	if keep.Status == model.APIKeyActive {
+		if err := s.db.Model(&model.APIKey{}).Where("id <> ? AND status = ?", keep.ID, model.APIKeyActive).Update("status", model.APIKeyRevoked).Error; err != nil {
+			return nil, err
+		}
+	}
+	if keep.Scopes == nil || len(keep.Scopes) != len(model.AllScopes()) {
+		keep.Scopes = model.ScopeList(model.AllScopes())
+		if err := s.db.Model(&keep).Updates(map[string]any{"scopes": keep.Scopes, "user_id": userID}).Error; err != nil {
+			return nil, err
+		}
+	}
+	return []model.APIKey{keep}, nil
 }
 
-// Revoke marks a key as revoked.
-func (s *APIKeyService) Revoke(id, userID uint) error {
-	result := s.db.Model(&model.APIKey{}).Where("id = ? AND user_id = ? AND status = ?", id, userID, model.APIKeyActive).Update("status", model.APIKeyRevoked)
+func (s *APIKeyService) Revoke(id, _ uint) error {
+	result := s.db.Model(&model.APIKey{}).Where("id = ? AND status = ?", id, model.APIKeyActive).Update("status", model.APIKeyRevoked)
 	if result.Error != nil {
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
 		var count int64
-		if err := s.db.Model(&model.APIKey{}).Where("id = ? AND user_id = ?", id, userID).Count(&count).Error; err != nil {
+		if err := s.db.Model(&model.APIKey{}).Where("id = ?", id).Count(&count).Error; err != nil {
 			return err
 		}
 		if count == 0 {
@@ -118,67 +151,45 @@ func (s *APIKeyService) Revoke(id, userID uint) error {
 	return nil
 }
 
-// Authenticate validates a plaintext secret and returns the key.
 func (s *APIKeyService) Authenticate(secret string) (*model.APIKey, error) {
 	secret = strings.TrimSpace(secret)
 	if secret == "" || !strings.HasPrefix(secret, apiKeyPrefix) {
 		return nil, Unauthorized("invalid api key")
 	}
-	var k model.APIKey
-	err := s.db.First(&k, "key_hash = ?", HashAPIKey(secret)).Error
-	if err != nil {
+	var key model.APIKey
+	if err := s.db.Where("key_hash = ?", HashAPIKey(secret)).First(&key).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, Unauthorized("invalid api key")
 		}
 		return nil, err
 	}
-	if !k.Usable(time.Now().UTC()) {
+	if !key.Usable(time.Now().UTC()) {
 		return nil, Unauthorized("api key revoked or expired")
 	}
-	return &k, nil
+	if len(key.Scopes) != len(model.AllScopes()) {
+		return nil, Unauthorized("invalid site api key")
+	}
+	return &key, nil
 }
 
-// TouchLastUsed updates last_used_at with throttling.
-func (s *APIKeyService) TouchLastUsed(k *model.APIKey) {
+func (s *APIKeyService) TouchLastUsed(key *model.APIKey) {
 	now := time.Now().UTC()
-	if k.LastUsedAt != nil && now.Sub(*k.LastUsedAt) < lastUsedThrottle {
+	if key.LastUsedAt != nil && now.Sub(*key.LastUsedAt) < lastUsedThrottle {
 		return
 	}
-	_ = s.db.Model(&model.APIKey{}).Where("id = ?", k.ID).UpdateColumn("last_used_at", now).Error
-	k.LastUsedAt = &now
+	_ = s.db.Model(&model.APIKey{}).Where("id = ?", key.ID).UpdateColumn("last_used_at", now).Error
+	key.LastUsedAt = &now
 }
 
-// HashAPIKey returns SHA-256 hex digest of secret.
 func HashAPIKey(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(sum[:])
 }
 
-// GenerateSecret creates a plaintext key with prefix.
 func GenerateSecret() (string, error) {
 	buf := make([]byte, apiKeyBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
 	return apiKeyPrefix + hex.EncodeToString(buf), nil
-}
-
-func normalizeScopes(scopes []string) (model.ScopeList, error) {
-	if len(scopes) == 0 {
-		return nil, BadRequest("at least one scope required")
-	}
-	seen := make(map[string]bool, len(scopes))
-	for _, sc := range scopes {
-		if !model.ValidScope(sc) {
-			return nil, BadRequest("unknown scope %q", sc)
-		}
-		seen[sc] = true
-	}
-	out := make(model.ScopeList, 0, len(seen))
-	for _, s := range model.AllScopes() {
-		if seen[s] {
-			out = append(out, s)
-		}
-	}
-	return out, nil
 }

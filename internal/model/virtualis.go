@@ -15,7 +15,9 @@ const (
 	DriverAuto  = "auto"
 )
 
-func AllDrivers() []string { return []string{DriverMock, DriverLXC, DriverIncus, DriverQEMU, DriverAuto} }
+func AllDrivers() []string {
+	return []string{DriverAuto, DriverIncus, DriverQEMU, DriverLXC, DriverMock}
+}
 func ValidDriver(d string) bool {
 	switch d {
 	case DriverMock, DriverLXC, DriverIncus, DriverQEMU, DriverAuto:
@@ -43,6 +45,11 @@ const (
 	ImageStatusAvailable   = "available"
 	ImageStatusDownloading = "downloading"
 	ImageStatusError       = "error"
+)
+
+const (
+	ImageTypeDisk = "disk"
+	ImageTypeISO  = "iso"
 )
 
 type InstanceSpec struct {
@@ -73,17 +80,21 @@ type Instance struct {
 
 type Image struct {
 	Base
-	Name        string `gorm:"uniqueIndex;size:128;not null" json:"name"`
-	DisplayName string `gorm:"size:128" json:"display_name"`
-	Description string `gorm:"type:text" json:"description"`
-	Driver      string `gorm:"size:16;not null;default:mock" json:"driver"`
-	OSType      string `gorm:"size:64" json:"os_type"`
-	OSVersion   string `gorm:"size:64" json:"os_version"`
-	Arch        string `gorm:"size:16" json:"arch"`
-	FilePath    string `gorm:"size:255" json:"file_path"`
-	SizeBytes   int64  `gorm:"not null;default:0" json:"size_bytes"`
-	Status      string `gorm:"size:16;not null;default:available" json:"status"`
-	IsPublic    bool   `gorm:"not null;default:true" json:"is_public"`
+	Name         string `gorm:"uniqueIndex;size:128;not null" json:"name"`
+	DisplayName  string `gorm:"size:128" json:"display_name"`
+	Description  string `gorm:"type:text" json:"description"`
+	Driver       string `gorm:"size:16;not null;default:mock" json:"driver"`
+	Type         string `gorm:"size:16;not null;default:disk" json:"type"`
+	OSType       string `gorm:"size:64" json:"os_type"`
+	OSVersion    string `gorm:"size:64" json:"os_version"`
+	Arch         string `gorm:"size:16" json:"arch"`
+	OriginalName string `gorm:"size:255" json:"original_name"`
+	MimeType     string `gorm:"size:128" json:"mime_type"`
+	FilePath     string `gorm:"size:255" json:"file_path"`
+	SizeBytes    int64  `gorm:"not null;default:0" json:"size_bytes"`
+	Checksum     string `gorm:"size:128" json:"checksum"`
+	Status       string `gorm:"size:16;not null;default:available" json:"status"`
+	IsPublic     bool   `gorm:"not null;default:true" json:"is_public"`
 }
 
 const (
@@ -218,5 +229,3 @@ func InstancePowerOps(status string) []string {
 		return []string{}
 	}
 }
-
-

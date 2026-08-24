@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -41,22 +42,32 @@ func (s *Store) Root() string { return s.root }
 
 // Save stores r under category and returns relative path, size and mime.
 func (s *Store) Save(category string, r io.Reader, limit int64) (string, int64, string, error) {
+	path, size, mime, _, err := s.SaveNamed(category, "", r, limit)
+	return path, size, mime, err
+}
+
+// SaveNamed stores a file while preserving a safe extension and calculating a
+// SHA-256 checksum. The original filename is never used as a path component.
+func (s *Store) SaveNamed(category, filename string, r io.Reader, limit int64) (string, int64, string, string, error) {
 	if err := validateSegment(category); err != nil {
-		return "", 0, "", err
+		return "", 0, "", "", err
 	}
 	dir := filepath.Join(category)
 	name, err := randomHex(16)
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", "", err
+	}
+	if ext := safeExtension(filename); ext != "" {
+		name += ext
 	}
 	rel := filepath.Join(dir, name)
 	if err := os.MkdirAll(filepath.Join(s.root, dir), dirPerm); err != nil {
-		return "", 0, "", fmt.Errorf("mkdir: %w", err)
+		return "", 0, "", "", fmt.Errorf("mkdir: %w", err)
 	}
 	abs := filepath.Join(s.root, rel)
 	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, filePerm)
 	if err != nil {
-		return "", 0, "", fmt.Errorf("create file: %w", err)
+		return "", 0, "", "", fmt.Errorf("create file: %w", err)
 	}
 	cleanup := func() {
 		_ = f.Close()
@@ -71,27 +82,38 @@ func (s *Store) Save(category string, r io.Reader, limit int64) (string, int64, 
 	head := make([]byte, sniffLen)
 	n, err := io.ReadFull(r, head)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return "", 0, "", fmt.Errorf("read: %w", err)
+		return "", 0, "", "", fmt.Errorf("read: %w", err)
 	}
 	head = head[:n]
 	if n == 0 {
-		return "", 0, "", ErrEmpty
+		return "", 0, "", "", ErrEmpty
 	}
 	mime := http.DetectContentType(head)
 
 	body := io.MultiReader(bytes.NewReader(head), r)
-	written, err := io.Copy(f, io.LimitReader(body, limit+1))
+	digest := sha256.New()
+	written, err := io.Copy(io.MultiWriter(f, digest), io.LimitReader(body, limit+1))
 	if err != nil {
-		return "", 0, "", fmt.Errorf("write: %w", err)
+		return "", 0, "", "", fmt.Errorf("write: %w", err)
 	}
 	if written > limit {
-		return "", 0, "", ErrTooLarge
+		return "", 0, "", "", ErrTooLarge
 	}
 	if err := f.Close(); err != nil {
-		return "", 0, "", fmt.Errorf("close: %w", err)
+		return "", 0, "", "", fmt.Errorf("close: %w", err)
 	}
 	cleanup = nil
-	return filepath.ToSlash(rel), written, mime, nil
+	return filepath.ToSlash(rel), written, mime, hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func safeExtension(filename string) string {
+	name := strings.ToLower(filepath.Base(strings.TrimSpace(filename)))
+	for _, ext := range []string{".tar.gz", ".qcow2", ".vmdk", ".vdi", ".raw", ".img", ".iso", ".zip", ".gz"} {
+		if strings.HasSuffix(name, ext) {
+			return ext
+		}
+	}
+	return ""
 }
 
 // Open opens a previously saved file.
@@ -102,6 +124,9 @@ func (s *Store) Open(rel string) (*os.File, error) {
 	}
 	return os.Open(abs)
 }
+
+// Path returns the validated absolute path for HTTP serving or metadata use.
+func (s *Store) Path(rel string) (string, error) { return s.resolve(rel) }
 
 // Remove deletes a file; missing file is ok.
 func (s *Store) Remove(rel string) error {

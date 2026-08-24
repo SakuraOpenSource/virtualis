@@ -1,16 +1,14 @@
 package middleware
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/SakuraOpenSource/virtualis/internal/httpx"
 	"github.com/SakuraOpenSource/virtualis/internal/model"
 	"github.com/SakuraOpenSource/virtualis/internal/runtime"
+	"github.com/SakuraOpenSource/virtualis/internal/service"
 )
 
 const ctxAPIKeyScopes = "virtualis_api_scopes"
@@ -24,14 +22,9 @@ func RequireAPIKey(rt *runtime.Runtime) gin.HandlerFunc {
 			httpx.Unauthorized(c, "api key required")
 			return
 		}
-		hash := hashKey(secret)
-		var k model.APIKey
-		if err := rt.DB().Where("key_hash = ?", hash).First(&k).Error; err != nil {
-			httpx.Unauthorized(c, "invalid api key")
-			return
-		}
-		if !k.Usable(time.Now()) {
-			httpx.Unauthorized(c, "api key revoked or expired")
+		k, err := service.NewAPIKeyService(rt.DB()).Authenticate(secret)
+		if err != nil {
+			httpx.Unauthorized(c, err.Error())
 			return
 		}
 		var u model.User
@@ -44,8 +37,7 @@ func RequireAPIKey(rt *runtime.Runtime) gin.HandlerFunc {
 			return
 		}
 		// Best-effort update last used.
-		now := time.Now()
-		_ = rt.DB().Model(&k).Update("last_used_at", now).Error
+		service.NewAPIKeyService(rt.DB()).TouchLastUsed(k)
 
 		httpx.SetUser(c, &u)
 		c.Set(ctxAPIKeyScopes, k.Scopes)
@@ -86,9 +78,4 @@ func bearerToken(h string) (string, bool) {
 		return "", false
 	}
 	return h[len(prefix):], true
-}
-
-func hashKey(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
 }

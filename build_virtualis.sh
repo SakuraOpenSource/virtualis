@@ -19,6 +19,7 @@ AGENT="$ROOT/virtualis-agent"
 if [ ! -d "$FRONT" ] && [ -d "$SCRIPT_DIR/../virtualis-frontend" ]; then FRONT="$SCRIPT_DIR/../virtualis-frontend"; fi
 if [ ! -d "$AGENT" ] && [ -d "$SCRIPT_DIR/../virtualis-agent" ]; then AGENT="$SCRIPT_DIR/../virtualis-agent"; fi
 BIN_DIR="$VIRT/bin"
+AGENT_PACKAGES_DIR="$VIRT/agent-packages"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 
@@ -33,7 +34,7 @@ done
 
 if [ "$CLEAN" -eq 1 ]; then
   echo -e "${YELLOW}清理旧产物...${NC}"
-  rm -rf "$VIRT/bin" "$VIRT/internal/web/dist" "$AGENT/bin"
+	 rm -rf "$VIRT/bin" "$VIRT/agent-packages" "$VIRT/internal/web/dist" "$AGENT/bin"
   mkdir -p "$VIRT/internal/web/dist" && touch "$VIRT/internal/web/dist/.gitkeep"
 fi
 
@@ -53,7 +54,10 @@ fi
 
 echo -e "${GREEN}=== 构建 Virtualis 主控 (Go) ===${NC}"
 if ! command -v go >/dev/null 2>&1; then echo -e "${RED}未找到 go${NC}"; exit 1; fi
+NATIVE_GOOS="$(go env GOOS)"
+NATIVE_GOARCH="$(go env GOARCH)"
 mkdir -p "$BIN_DIR"
+mkdir -p "$AGENT_PACKAGES_DIR"
 (cd "$VIRT" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$BIN_DIR/virtualis" ./cmd/virtualis)
 ls -lh "$BIN_DIR/virtualis"
 echo -e "${GREEN}主控本机构建完成: $BIN_DIR/virtualis${NC}"
@@ -74,6 +78,8 @@ if [ -d "$AGENT" ]; then
   (cd "$AGENT" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$AGENT/bin/virtualis-agent" ./cmd/agent)
   ls -lh "$AGENT/bin/virtualis-agent"
   cp "$AGENT/bin/virtualis-agent" "$BIN_DIR/virtualis-agent" 2>/dev/null || true
+  NATIVE_EXT=""; [ "$NATIVE_GOOS" = "windows" ] && NATIVE_EXT=".exe"
+  cp "$AGENT/bin/virtualis-agent" "$AGENT_PACKAGES_DIR/virtualis-agent-${NATIVE_GOOS}-${NATIVE_GOARCH}${NATIVE_EXT}" 2>/dev/null || true
   echo -e "${GREEN}被控本机构建完成: $AGENT/bin/virtualis-agent${NC}"
   if [ "$ALL" -eq 1 ]; then
     echo -e "${GREEN}=== 交叉编译被控全平台 ===${NC}"
@@ -85,6 +91,7 @@ if [ -d "$AGENT" ]; then
       (cd "$AGENT" && CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags "-s -w" -o "$OUT" ./cmd/agent)
       ls -lh "$OUT"
       cp "$OUT" "$OUT2" 2>/dev/null || true
+      cp "$OUT" "$AGENT_PACKAGES_DIR/virtualis-agent-${GOOS}-${GOARCH}${EXT}" 2>/dev/null || true
     done
   fi
 else

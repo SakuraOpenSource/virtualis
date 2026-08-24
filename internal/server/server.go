@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	bodyLimit       = 1 << 20       // 1 MiB for JSON bodies
-	multipartMemory = 8 << 20       // 8 MiB for multipart
+	bodyLimit       = 1 << 20 // 1 MiB for JSON bodies
+	multipartMemory = 8 << 20 // 8 MiB for multipart
+	imageBodyLimit  = int64(64 << 30)
 )
 
 // New builds the gin engine with all routes.
@@ -77,6 +78,8 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	// Write operations are additionally gated by admin.
 	adminImages := authed.Group("/images", middleware.RequireAdmin())
 	adminImages.POST("", h.CreateImage)
+	adminImages.POST("/upload", h.UploadImage)
+	adminImages.GET("/:id/download", h.DownloadImage)
 	adminImages.DELETE("/:id", h.DeleteImage)
 
 	// Admin-only settings & agents
@@ -113,7 +116,11 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 
 func limitBody() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, bodyLimit)
+		limit := int64(bodyLimit)
+		if strings.HasPrefix(strings.ToLower(c.GetHeader("Content-Type")), "multipart/form-data") {
+			limit = imageBodyLimit
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 		c.Next()
 	}
 }
