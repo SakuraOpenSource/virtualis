@@ -72,6 +72,35 @@ func (s *AgentService) Create(name, displayName string) (*model.Agent, string, e
 	return &agent, token, nil
 }
 
+// RotateToken invalidates the old token while keeping the node and its
+// instance assignments. The node becomes pending until restarted with the
+// returned token.
+func (s *AgentService) RotateToken(id uint) (*model.Agent, string, error) {
+	agent, err := s.Get(id)
+	if err != nil {
+		return nil, "", err
+	}
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, "", err
+	}
+	token := hex.EncodeToString(raw)
+	hash := sha256.Sum256([]byte(token))
+	if err := s.db.Model(agent).Updates(map[string]any{
+		"token":        token,
+		"token_hash":   hex.EncodeToString(hash[:]),
+		"status":       model.AgentStatusPending,
+		"last_seen_at": nil,
+	}).Error; err != nil {
+		return nil, "", err
+	}
+	agent.Token = token
+	agent.TokenHash = hex.EncodeToString(hash[:])
+	agent.Status = model.AgentStatusPending
+	agent.LastSeenAt = nil
+	return agent, token, nil
+}
+
 func (s *AgentService) Delete(id uint) error {
 	result := s.db.Delete(&model.Agent{}, id)
 	if result.Error != nil {

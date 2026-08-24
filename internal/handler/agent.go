@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/SakuraOpenSource/virtualis/internal/httpx"
+	"github.com/SakuraOpenSource/virtualis/internal/model"
 )
 
 type createAgentReq struct {
@@ -34,6 +35,23 @@ func (h *Handler) CreateAgent(c *gin.Context) {
 		respond(c, nil, err)
 		return
 	}
+	respond(c, h.agentSetup(c, agent, token), nil)
+}
+
+func (h *Handler) RotateAgentToken(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	agent, token, err := h.agents().RotateToken(id)
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	respond(c, h.agentSetup(c, agent, token), nil)
+}
+
+func (h *Handler) agentSetup(c *gin.Context, agent *model.Agent, token string) gin.H {
 	master := c.Request.Host
 	scheme := "http"
 	if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
@@ -42,13 +60,13 @@ func (h *Handler) CreateAgent(c *gin.Context) {
 	masterURL := scheme + "://" + master
 	joinCmd := "sudo ./virtualis-agent --master " + shellQuote(masterURL) + " --token " + shellQuote(token) + " --name " + shellQuote(agent.Name)
 	curlCmd := "curl -fsSL " + shellQuote(masterURL+"/api/agent/install.sh") + " | bash -s -- --master " + shellQuote(masterURL) + " --token " + shellQuote(token) + " --name " + shellQuote(agent.Name)
-	respond(c, gin.H{
+	return gin.H{
 		"agent":     agent,
 		"token":     token,
 		"join_cmd":  joinCmd,
 		"curl_cmd":  curlCmd,
 		"downloads": agentDownloads(masterURL + "/api/agent/binary"),
-	}, nil)
+	}
 }
 
 func (h *Handler) DeleteAgent(c *gin.Context) {

@@ -96,6 +96,7 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	admin.PUT("/settings/captcha", h.UpdateCaptchaSettings)
 	admin.GET("/agents", h.Agents)
 	admin.POST("/agents", h.CreateAgent)
+	admin.POST("/agents/:id/rotate-token", h.RotateAgentToken)
 	admin.DELETE("/agents/:id", h.DeleteAgent)
 
 	// Agent self-registration (no CSRF, token-based) - must be outside CSRF group
