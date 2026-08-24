@@ -114,8 +114,13 @@ done
 
 [[ "$(id -u)" -eq 0 ]] || die "请使用 sudo 或 root 执行"
 [[ -f /etc/os-release ]] || die "无法识别 Linux 发行版"
+# /etc/os-release 会定义 VERSION="13 (trixie)" 等变量，需避免覆盖脚本自身的 VERSION/GITHUB_REPO
+_saved_version="$VERSION"
+_saved_github_repo="$GITHUB_REPO"
 # shellcheck disable=SC1091
 . /etc/os-release
+VERSION="$_saved_version"
+GITHUB_REPO="$_saved_github_repo"
 
 if [[ -z "$ROLE" ]]; then
   echo "请选择安装角色："
