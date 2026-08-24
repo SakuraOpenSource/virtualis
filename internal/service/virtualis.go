@@ -153,7 +153,7 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	}
 	capabilities, err := client.Drivers(ctx)
 	if err != nil {
-		return nil, err
+		return nil, agentFailure(err)
 	}
 
 	driverName := strings.ToLower(strings.TrimSpace(req.Driver))
@@ -234,7 +234,7 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if remoteErr != nil {
 		_ = s.db.Model(instance).Update("status", model.InstanceStatusError).Error
 		instance.Status = model.InstanceStatusError
-		return instance, remoteErr
+		return instance, agentFailure(remoteErr)
 	}
 	applyWireInstance(instance, remote)
 	if !model.ValidInstanceStatus(instance.Status) || instance.Status == model.InstanceStatusCreating {
@@ -276,7 +276,7 @@ func (s *VirtualisService) DeleteInstance(ctx context.Context, id uint) error {
 			return clientErr
 		}
 		if err := client.DeleteInstance(ctx, toWireInstance(instance, instance.Image)); err != nil {
-			return err
+			return agentFailure(err)
 		}
 	}
 	return s.db.Delete(&model.Instance{}, id).Error
@@ -314,7 +314,7 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	remote, err := client.PowerInstance(ctx, toWireInstance(instance, instance.Image), action, toWireImage(instance.Image), reader, filename)
 	if err != nil {
 		_ = s.db.Model(instance).Update("status", model.InstanceStatusError).Error
-		return nil, err
+		return nil, agentFailure(err)
 	}
 	applyWireInstance(instance, remote)
 	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver}).Error; err != nil {
@@ -337,7 +337,7 @@ func (s *VirtualisService) RefreshStatus(ctx context.Context, id uint) (*model.I
 	}
 	remote, err := client.Status(ctx, toWireInstance(instance, instance.Image))
 	if err != nil {
-		return nil, err
+		return nil, agentFailure(err)
 	}
 	applyWireInstance(instance, remote)
 	if !model.ValidInstanceStatus(instance.Status) {
@@ -361,7 +361,11 @@ func (s *VirtualisService) InstanceMetrics(ctx context.Context, id uint) (agentc
 	if err != nil {
 		return agentclient.Metrics{}, err
 	}
-	return client.Metrics(ctx, toWireInstance(instance, instance.Image))
+	metrics, err := client.Metrics(ctx, toWireInstance(instance, instance.Image))
+	if err != nil {
+		return agentclient.Metrics{}, agentFailure(err)
+	}
+	return metrics, nil
 }
 
 func (s *VirtualisService) InstanceNetwork(ctx context.Context, id uint) (agentclient.NetworkStatus, error) {
@@ -376,7 +380,11 @@ func (s *VirtualisService) InstanceNetwork(ctx context.Context, id uint) (agentc
 	if err != nil {
 		return agentclient.NetworkStatus{}, err
 	}
-	return client.Network(ctx, toWireInstance(instance, instance.Image))
+	network, err := client.Network(ctx, toWireInstance(instance, instance.Image))
+	if err != nil {
+		return agentclient.NetworkStatus{}, agentFailure(err)
+	}
+	return network, nil
 }
 
 func (s *VirtualisService) InstanceVNC(ctx context.Context, id uint) (agentclient.VNCInfo, error) {
@@ -391,7 +399,11 @@ func (s *VirtualisService) InstanceVNC(ctx context.Context, id uint) (agentclien
 	if err != nil {
 		return agentclient.VNCInfo{}, err
 	}
-	return client.VNC(ctx, toWireInstance(instance, instance.Image))
+	vnc, err := client.VNC(ctx, toWireInstance(instance, instance.Image))
+	if err != nil {
+		return agentclient.VNCInfo{}, agentFailure(err)
+	}
+	return vnc, nil
 }
 
 func (s *VirtualisService) agentClient(agent *model.Agent) (*agentclient.Client, error) {
@@ -401,7 +413,18 @@ func (s *VirtualisService) agentClient(agent *model.Agent) (*agentclient.Client,
 	if strings.TrimSpace(agent.Token) == "" {
 		return nil, Conflict("被控 token 已失效，请删除节点后重新添加")
 	}
-	return agentclient.New(agent.Endpoint, agent.Token)
+	client, err := agentclient.New(agent.Endpoint, agent.Token)
+	if err != nil {
+		return nil, agentFailure(err)
+	}
+	return client, nil
+}
+
+func agentFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return Unavailable("被控节点操作失败: %s", err.Error())
 }
 
 // Images

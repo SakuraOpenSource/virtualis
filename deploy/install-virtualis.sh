@@ -222,6 +222,10 @@ install_backend() {
         apk) pkg_install qemu-img libvirt qemu-system-x86_64;;
       esac
       systemctl enable --now libvirtd 2>/dev/null || systemctl enable --now libvirt 2>/dev/null || true
+      if command -v virsh >/dev/null 2>&1; then
+        virsh net-autostart default >/dev/null 2>&1 || true
+        virsh net-start default >/dev/null 2>&1 || true
+      fi
       ;;
     lxc)
       info "安装 LXC"

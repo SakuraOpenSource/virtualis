@@ -34,6 +34,14 @@ sudo bash deploy/install-virtualis.sh --role agent --master http://MASTER_IP:808
 
 服务名分别为 `virtualis.service` 和 `virtualis-agent.service`。二进制分别位于 `/opt/virtualis/virtualis` 与 `/opt/virtualis-agent/virtualis-agent`，数据目录分别为 `/var/lib/virtualis` 与 `/var/lib/virtualis-agent`。
 
+如果忘记管理员密码，可在主控上执行：
+
+```bash
+sudo systemctl stop virtualis
+sudo /opt/virtualis/virtualis -data /var/lib/virtualis --reset-password
+sudo systemctl start virtualis
+```
+
 ### Linux
 ```bash
 sudo bash deploy/install-linux.sh          # 主控
