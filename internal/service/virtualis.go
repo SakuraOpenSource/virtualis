@@ -610,22 +610,8 @@ func (s *VirtualisService) DeleteImage(id uint) error {
 }
 
 func (s *VirtualisService) EnsureDefaultImages() error {
-	defaults := []CreateImageRequest{
-		{Name: "ubuntu-22.04", Driver: model.DriverQEMU, Type: model.ImageTypeDisk, FilePath: "images/ubuntu-22.04.qcow2"},
-		{Name: "debian-12", Driver: model.DriverQEMU, Type: model.ImageTypeDisk, FilePath: "images/debian-12.qcow2"},
-		{Name: "alpine-3.19", Driver: model.DriverLXC, Type: model.ImageTypeDisk, FilePath: "images/alpine-3.19.tar.gz"},
-	}
-	for _, item := range defaults {
-		var count int64
-		if err := s.db.Model(&model.Image{}).Where("name = ?", item.Name).Count(&count).Error; err != nil {
-			return err
-		}
-		if count == 0 {
-			if _, err := s.CreateImage(item); err != nil {
-				return err
-			}
-		}
-	}
+	// 镜像必须通过上传离线存储到 data/images 目录，不再创建指向不存在文件的在线占位镜像
+	// 保留此方法以兼容旧数据库的调用点，但不再自动插入默认镜像记录
 	return nil
 }
 
