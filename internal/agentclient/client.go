@@ -19,6 +19,13 @@ import (
 
 // Instance is the small, stable wire representation shared by master and agent.
 // It deliberately excludes database associations and credentials.
+// NATMapping 是一条 NAT 端口转发（宿主端口 → 实例端口）。
+type NATMapping struct {
+	Protocol  string `json:"protocol"`
+	HostPort  int    `json:"host_port"`
+	GuestPort int    `json:"guest_port"`
+}
+
 type Instance struct {
 	ID          uint                `json:"id"`
 	Name        string              `json:"name"`
@@ -30,6 +37,8 @@ type Instance struct {
 	Spec        model.InstanceSpec  `json:"spec"`
 	Network     model.NetworkConfig `json:"network"`
 	Image       *Image              `json:"image,omitempty"`
+	// NATMappings 是期望清单，被控开机时应用 DNAT、关机/删除时清除。
+	NATMappings []NATMapping `json:"nat_mappings,omitempty"`
 }
 
 // Image contains the metadata an agent needs to attach an image locally.
@@ -211,6 +220,34 @@ func (c *Client) HostNetwork(ctx context.Context) (*HostNetworkSummary, error) {
 		return nil, err
 	}
 	return &out.Network, nil
+}
+
+// ApplyNAT 把实例的期望 NAT 映射全量下发给被控对账（运行中即时生效）。
+func (c *Client) ApplyNAT(ctx context.Context, instance Instance) error {
+	body := map[string]any{"instance": instance, "mappings": instance.NATMappings}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("instances/%d/nat", instance.ID), bytes.NewReader(raw), "application/json")
+	if err != nil {
+		return err
+	}
+	return c.do(req, nil)
+}
+
+// SetRootPassword 向运行中的实例注入 root 密码。
+func (c *Client) SetRootPassword(ctx context.Context, instance Instance, password string) error {
+	body := map[string]any{"instance": instance, "password": password}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("instances/%d/password", instance.ID), bytes.NewReader(raw), "application/json")
+	if err != nil {
+		return err
+	}
+	return c.do(req, nil)
 }
 
 func (c *Client) CreateInstance(ctx context.Context, instance Instance, image *Image, imageFile io.Reader, filename string) (Instance, error) {

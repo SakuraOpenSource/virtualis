@@ -2,11 +2,15 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -112,12 +116,13 @@ func (s *VirtualisService) ListInstances(page, pageSize int) ([]model.Instance, 
 // GetInstance returns instance by id.
 func (s *VirtualisService) GetInstance(id uint) (*model.Instance, error) {
 	var inst model.Instance
-	if err := s.db.Preload("Image").Preload("Agent").First(&inst, id).Error; err != nil {
+	if err := s.db.Preload("Image").Preload("Agent").Preload("NATMappings").First(&inst, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, NotFound("instance not found")
 		}
 		return nil, err
 	}
+	inst.SSHPassword = inst.LoadSSHPassword()
 	return &inst, nil
 }
 
@@ -129,6 +134,10 @@ type CreateInstanceRequest struct {
 	Network model.NetworkConfig `json:"network"`
 	ImageID *uint               `json:"image_id"`
 	AgentID *uint               `json:"agent_id"`
+	// MaxNATMappings 是允许创建的 NAT 映射上限，0 表示不限。
+	MaxNATMappings int `json:"max_nat_mappings"`
+	// AutoPassword 为 true（默认）时生成随机 root 密码并存库供管理页查看。
+	AutoPassword *bool `json:"auto_password"`
 }
 
 // CreateInstance records an instance and provisions it on the selected agent.
@@ -229,17 +238,45 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	}
 
 	instance := &model.Instance{
-		Name:    strings.TrimSpace(req.Name),
-		Driver:  driverName,
-		Type:    normalizeInstanceType(req.Type),
-		Spec:    spec,
-		Network: network,
-		Status:  model.InstanceStatusCreating,
-		ImageID: req.ImageID,
-		AgentID: req.AgentID,
+		Name:           strings.TrimSpace(req.Name),
+		Driver:         driverName,
+		Type:           normalizeInstanceType(req.Type),
+		Spec:           spec,
+		Network:        network,
+		Status:         model.InstanceStatusCreating,
+		ImageID:        req.ImageID,
+		AgentID:        req.AgentID,
+		MaxNATMappings: req.MaxNATMappings,
+	}
+	if instance.MaxNATMappings < 0 {
+		instance.MaxNATMappings = 0
+	}
+	// 默认生成随机 root 密码：管理页可查看并连接，NAT 模式再自动配一条
+	// 22 端口映射。AutoPassword 缺省视为 true。
+	autoPassword := req.AutoPassword == nil || *req.AutoPassword
+	if autoPassword {
+		instance.StoreSSHPassword(GeneratePassword(16))
 	}
 	if err := s.db.Create(instance).Error; err != nil {
 		return nil, err
+	}
+	// 自动 SSH 映射：NAT 模式且有密码时建一条 TCP 22 转发，不计入上限。
+	if autoPassword && network.Mode == model.NetworkModeNAT {
+		hostPort, portErr := s.allocateNATPort(*req.AgentID)
+		if portErr == nil {
+			mapping := model.NATMapping{
+				InstanceID: instance.ID,
+				AgentID:    *req.AgentID,
+				Protocol:   "tcp",
+				HostPort:   hostPort,
+				GuestPort:  22,
+				Remark:     "SSH（自动）",
+				Auto:       true,
+			}
+			if err := s.db.Create(&mapping).Error; err == nil {
+				instance.NATMappings = append(instance.NATMappings, mapping)
+			}
+		}
 	}
 
 	reader, filename, openErr := s.openImage(image)
@@ -258,10 +295,13 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 		return instance, agentFailure(remoteErr)
 	}
 	applyWireInstance(instance, remote)
+	mergeRemoteNetwork(instance, remote)
 	if !model.ValidInstanceStatus(instance.Status) || instance.Status == model.InstanceStatusCreating {
 		instance.Status = model.InstanceStatusStopped
 	}
-	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver}).Error; err != nil {
+	if err := s.db.Model(instance).Updates(map[string]any{
+		"status": instance.Status, "driver": instance.Driver, "network": instance.Network,
+	}).Error; err != nil {
 		return nil, err
 	}
 	return s.GetInstance(instance.ID)
@@ -724,7 +764,210 @@ func toWireInstance(instance *model.Instance, image *model.Image) agentclient.In
 		Spec:        instance.Spec,
 		Network:     instance.Network,
 		Image:       toWireImage(image),
+		NATMappings: toWireMappings(instance.NATMappings),
 	}
+}
+
+func toWireMappings(items []model.NATMapping) []agentclient.NATMapping {
+	out := make([]agentclient.NATMapping, 0, len(items))
+	for _, item := range items {
+		out = append(out, agentclient.NATMapping{
+			Protocol:  item.Protocol,
+			HostPort:  item.HostPort,
+			GuestPort: item.GuestPort,
+		})
+	}
+	return out
+}
+
+// mergeRemoteNetwork 把被控回填的 NAT 保留地址/派生 MAC 合并进实例，
+// 只在 NAT 模式且本地为空时填充，避免覆盖用户的独立 IP 声明。
+func mergeRemoteNetwork(instance *model.Instance, remote agentclient.Instance) {
+	if instance.Network.Mode != model.NetworkModeNAT {
+		return
+	}
+	if instance.Network.IPv4 == "" && remote.Network.IPv4 != "" {
+		instance.Network.IPv4 = remote.Network.IPv4
+	}
+	if instance.Network.MAC == "" && remote.Network.MAC != "" {
+		instance.Network.MAC = remote.Network.MAC
+	}
+}
+
+// GeneratePassword 生成 n 位字母数字随机密码（去掉了易混字符）。
+func GeneratePassword(n int) string {
+	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	raw := make([]byte, n)
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand 失败属于系统级异常，直接降级为确定性占位。
+		for i := range raw {
+			raw[i] = charset[i%len(charset)]
+		}
+		return string(raw)
+	}
+	for i, b := range buf {
+		raw[i] = charset[int(b)%len(charset)]
+	}
+	return string(raw)
+}
+
+// allocateNATPort 在自动分配范围内为被控找一个未被占用的宿主端口。
+func (s *VirtualisService) allocateNATPort(agentID uint) (int, error) {
+	var taken []int
+	if err := s.db.Model(&model.NATMapping{}).Where("agent_id = ?", agentID).Pluck("host_port", &taken).Error; err != nil {
+		return 0, err
+	}
+	used := make(map[int]bool, len(taken))
+	for _, port := range taken {
+		used[port] = true
+	}
+	for port := model.NATPortMin; port <= model.NATPortMax; port++ {
+		if !used[port] {
+			return port, nil
+		}
+	}
+	return 0, Conflict("NAT 宿主端口已耗尽（%d-%d）", model.NATPortMin, model.NATPortMax)
+}
+
+// CreateNATMappingRequest 是新增 NAT 映射的入参；HostPort 为 0 时自动分配。
+type CreateNATMappingRequest struct {
+	Protocol  string `json:"protocol"`
+	HostPort  int    `json:"host_port"`
+	GuestPort int    `json:"guest_port"`
+	Remark    string `json:"remark"`
+}
+
+// CreateNATMapping 为实例添加 NAT 端口转发；实例运行中时即时下发被控。
+func (s *VirtualisService) CreateNATMapping(ctx context.Context, instanceID uint, req CreateNATMappingRequest) (*model.NATMapping, error) {
+	instance, err := s.GetInstance(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if instance.AgentID == nil || *instance.AgentID == 0 {
+		return nil, Conflict("实例没有关联被控节点")
+	}
+	if instance.MaxNATMappings > 0 {
+		var count int64
+		if err := s.db.Model(&model.NATMapping{}).Where("instance_id = ?", instanceID).Count(&count).Error; err != nil {
+			return nil, err
+		}
+		if int(count) >= instance.MaxNATMappings {
+			return nil, Conflict("已达该实例的 NAT 映射上限（%d 条）", instance.MaxNATMappings)
+		}
+	}
+	protocolName := strings.ToLower(strings.TrimSpace(req.Protocol))
+	if protocolName == "" {
+		protocolName = "tcp"
+	}
+	if !model.ValidNATProtocol(protocolName) {
+		return nil, BadRequest("协议只支持 tcp/udp")
+	}
+	if req.GuestPort < 1 || req.GuestPort > 65535 {
+		return nil, BadRequest("实例端口需在 1-65535 之间")
+	}
+	hostPort := req.HostPort
+	if hostPort == 0 {
+		if hostPort, err = s.allocateNATPort(*instance.AgentID); err != nil {
+			return nil, err
+		}
+	}
+	if hostPort < 1 || hostPort > 65535 {
+		return nil, BadRequest("宿主端口需在 1-65535 之间")
+	}
+	// 同一被控上宿主端口不能重复（不同实例之间也不行）。
+	var dup int64
+	if err := s.db.Model(&model.NATMapping{}).
+		Where("agent_id = ? AND protocol = ? AND host_port = ?", *instance.AgentID, protocolName, hostPort).
+		Count(&dup).Error; err != nil {
+		return nil, err
+	}
+	if dup > 0 {
+		return nil, Conflict("宿主端口 %d/%s 已被其它映射占用", hostPort, protocolName)
+	}
+	mapping := model.NATMapping{
+		InstanceID: instanceID,
+		AgentID:    *instance.AgentID,
+		Protocol:   protocolName,
+		HostPort:   hostPort,
+		GuestPort:  req.GuestPort,
+		Remark:     strings.TrimSpace(req.Remark),
+	}
+	if err := s.db.Create(&mapping).Error; err != nil {
+		return nil, err
+	}
+	// 预载清单还是旧值，先补上新映射再下发。
+	instance.NATMappings = append(instance.NATMappings, mapping)
+	s.syncNATIfRunning(ctx, instance)
+	return &mapping, nil
+}
+
+// DeleteNATMapping 删除 NAT 映射；运行中的实例即时撤销对应规则。
+func (s *VirtualisService) DeleteNATMapping(ctx context.Context, instanceID, mappingID uint) error {
+	instance, err := s.GetInstance(instanceID)
+	if err != nil {
+		return err
+	}
+	result := s.db.Where("instance_id = ? AND id = ?", instanceID, mappingID).Delete(&model.NATMapping{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return NotFound("映射不存在")
+	}
+	kept := instance.NATMappings[:0]
+	for _, item := range instance.NATMappings {
+		if item.ID != mappingID {
+			kept = append(kept, item)
+		}
+	}
+	instance.NATMappings = kept
+	s.syncNATIfRunning(ctx, instance)
+	return nil
+}
+
+// syncNATIfRunning 把最新的映射清单推给被控；实例未运行时被控侧没有
+// 规则可对账，直接跳过。
+func (s *VirtualisService) syncNATIfRunning(ctx context.Context, instance *model.Instance) {
+	if instance.Status != model.InstanceStatusRunning || instance.Agent == nil {
+		return
+	}
+	client, err := s.agentClient(instance.Agent)
+	if err != nil {
+		return
+	}
+	_ = client.ApplyNAT(ctx, toWireInstance(instance, instance.Image))
+}
+
+// SetInstancePassword 设置实例的 root 密码并落库；实例运行中时异步推给
+// 被控注入（QEMU 依赖 guest agent，注入可能滞后于本调用返回）。
+func (s *VirtualisService) SetInstancePassword(ctx context.Context, instanceID uint, password string) (*model.Instance, error) {
+	password = strings.TrimSpace(password)
+	if utf8.RuneCountInString(password) < 6 || utf8.RuneCountInString(password) > 64 {
+		return nil, BadRequest("密码长度需在 6-64 个字符之间")
+	}
+	instance, err := s.GetInstance(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	instance.StoreSSHPassword(password)
+	if err := s.db.Model(instance).Update("config_json", instance.ConfigJSON).Error; err != nil {
+		return nil, err
+	}
+	if instance.Status == model.InstanceStatusRunning && instance.Agent != nil {
+		if client, err := s.agentClient(instance.Agent); err == nil {
+			// 后台注入：QEMU 要等 guest agent 就绪，不阻塞本次请求。
+			wire := toWireInstance(instance, instance.Image)
+			go func() {
+				applyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				if err := client.SetRootPassword(applyCtx, wire, password); err != nil {
+					log.Printf("实例 %d 注入密码失败: %v", instanceID, err)
+				}
+			}()
+		}
+	}
+	return s.GetInstance(instanceID)
 }
 
 func applyWireInstance(instance *model.Instance, remote agentclient.Instance) {

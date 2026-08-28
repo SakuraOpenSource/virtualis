@@ -73,6 +73,9 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	authed.GET("/instances/:id/status", h.InstanceStatus)
 	authed.GET("/instances/:id/metrics", h.InstanceMetrics)
 	authed.GET("/instances/:id/network", h.InstanceNetwork)
+	authed.POST("/instances/:id/nat", h.InstanceNATCreate)
+	authed.DELETE("/instances/:id/nat/:mid", h.InstanceNATDelete)
+	authed.POST("/instances/:id/password", h.InstancePasswordSet)
 	authed.GET("/instances/:id/vnc", h.InstanceVNC)
 	authed.GET("/instances/:id/vnc/ws", h.InstanceVNCWebSocket)
 

@@ -67,5 +67,6 @@ func AllModels() []any {
 		&Instance{},
 		&Image{},
 		&Agent{},
+		&NATMapping{},
 	}
 }

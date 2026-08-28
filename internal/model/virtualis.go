@@ -156,12 +156,66 @@ type Instance struct {
 	Spec        InstanceSpec  `gorm:"type:text;serializer:json" json:"spec"`
 	Network     NetworkConfig `gorm:"type:text;serializer:json" json:"network"`
 	IP          string        `gorm:"size:64" json:"ip"`
-	ConfigJSON  string        `gorm:"type:text" json:"config_json"`
-	OwnerID     *uint         `gorm:"index" json:"owner_id"`
-	Owner       *User         `gorm:"foreignKey:OwnerID" json:"owner,omitempty"`
-	Image       *Image        `gorm:"foreignKey:ImageID" json:"image,omitempty"`
-	AgentID     *uint         `gorm:"index" json:"agent_id"`
-	Agent       *Agent        `gorm:"foreignKey:AgentID" json:"agent,omitempty"`
+	ConfigJSON  string        `gorm:"type:text" json:"-"`
+	// MaxNATMappings 是该实例允许创建的 NAT 映射上限，0 表示不限。
+	MaxNATMappings int    `gorm:"not null;default:0" json:"max_nat_mappings"`
+	OwnerID        *uint  `gorm:"index" json:"owner_id"`
+	Owner          *User  `gorm:"foreignKey:OwnerID" json:"owner,omitempty"`
+	Image          *Image `gorm:"foreignKey:ImageID" json:"image,omitempty"`
+	AgentID        *uint  `gorm:"index" json:"agent_id"`
+	Agent          *Agent `gorm:"foreignKey:AgentID" json:"agent,omitempty"`
+	// NATMappings 是该实例的 NAT 端口转发清单，由被控在开机时应用。
+	NATMappings []NATMapping `gorm:"foreignKey:InstanceID" json:"nat_mappings,omitempty"`
+	// SSHPassword 是运行时注入的 root 密码（存 ConfigJSON），只在详情
+	// 接口填充，不落列。
+	SSHPassword string `gorm:"-" json:"ssh_password,omitempty"`
+}
+
+// NATMapping 是实例的一条 NAT 端口转发：被控主机 HostPort → 实例 GuestPort。
+type NATMapping struct {
+	Base
+	InstanceID uint   `gorm:"index;not null" json:"instance_id"`
+	AgentID    uint   `gorm:"index" json:"agent_id"`
+	Protocol   string `gorm:"size:8;not null;default:tcp" json:"protocol"`
+	HostPort   int    `gorm:"not null" json:"host_port"`
+	GuestPort  int    `gorm:"not null" json:"guest_port"`
+	Remark     string `gorm:"size:64" json:"remark"`
+	// Auto 标记自动创建的映射（如 SSH 端口），前端据此展示。
+	Auto bool `gorm:"not null;default:false" json:"auto"`
+}
+
+// NAT 宿主端口的自动分配范围。
+const (
+	NATPortMin = 20000
+	NATPortMax = 29999
+)
+
+// ValidNATProtocol 报告 p 是否为受支持的转发协议。
+func ValidNATProtocol(p string) bool {
+	return p == "tcp" || p == "udp"
+}
+
+// instanceConfig 是 ConfigJSON 的结构化形态。密码明文落库是管理页
+// 「可查看并连接」的明确需求，防护口径与 API Key 明文不落库不同。
+type instanceConfig struct {
+	SSHPassword string `json:"ssh_password,omitempty"`
+}
+
+// LoadSSHPassword 从 ConfigJSON 解析 root 密码，未设置时返回空。
+func (i *Instance) LoadSSHPassword() string {
+	var cfg instanceConfig
+	if i.ConfigJSON != "" && json.Unmarshal([]byte(i.ConfigJSON), &cfg) == nil {
+		return cfg.SSHPassword
+	}
+	return ""
+}
+
+// StoreSSHPassword 把 root 密码写进 ConfigJSON。
+func (i *Instance) StoreSSHPassword(password string) {
+	cfg := instanceConfig{SSHPassword: password}
+	if raw, err := json.Marshal(cfg); err == nil {
+		i.ConfigJSON = string(raw)
+	}
 }
 
 type Image struct {

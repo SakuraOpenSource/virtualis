@@ -5,6 +5,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -143,6 +144,57 @@ func (h *Handler) InstanceMetrics(c *gin.Context) {
 	}
 	metrics, err := h.virtualis().InstanceMetrics(c.Request.Context(), id)
 	respond(c, gin.H{"metrics": metrics}, err)
+}
+
+// InstanceNATCreate 为实例新增 NAT 端口映射。
+func (h *Handler) InstanceNATCreate(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req service.CreateNATMappingRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	mapping, err := h.virtualis().CreateNATMapping(c.Request.Context(), id, req)
+	respond(c, mapping, err)
+}
+
+// InstanceNATDelete 删除实例的一条 NAT 端口映射。
+func (h *Handler) InstanceNATDelete(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	mid, err := strconv.ParseUint(c.Param("mid"), 10, 64)
+	if err != nil || mid == 0 {
+		BadRequest(c, "invalid mapping id")
+		return
+	}
+	err = h.virtualis().DeleteNATMapping(c.Request.Context(), id, uint(mid))
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	noContent(c)
+}
+
+type setPasswordRequest struct {
+	Password string `json:"password"`
+}
+
+// InstancePasswordSet 设置实例的 root 密码（运行中会异步注入）。
+func (h *Handler) InstancePasswordSet(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req setPasswordRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	instance, err := h.virtualis().SetInstancePassword(c.Request.Context(), id, req.Password)
+	respond(c, instance, err)
 }
 
 func (h *Handler) InstanceNetwork(c *gin.Context) {
