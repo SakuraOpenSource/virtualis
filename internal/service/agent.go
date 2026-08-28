@@ -119,7 +119,8 @@ func (s *AgentService) Authenticate(token string) (*model.Agent, error) {
 	hash := sha256.Sum256([]byte(strings.TrimSpace(token)))
 	var agent model.Agent
 	if err := s.db.First(&agent, "token_hash = ?", hex.EncodeToString(hash[:])).Error; err != nil {
-		return nil, ErrUnauthorized("token 无效")
+		// 常见于：节点在主控被删除、token 已轮换、或主控换了数据库重装。
+		return nil, ErrUnauthorized("token 无效：请在主控「被控节点」重新生成接入指令并更新被控 --token")
 	}
 	return &agent, nil
 }
