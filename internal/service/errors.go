@@ -64,8 +64,8 @@ func AsError(err error) (*BizError, bool) {
 }
 
 // Also expose Err* aliases for compatibility.
-func ErrBadRequest(format string, args ...any) *BizError { return BadRequest(format, args...) }
+func ErrBadRequest(format string, args ...any) *BizError   { return BadRequest(format, args...) }
 func ErrUnauthorized(format string, args ...any) *BizError { return Unauthorized(format, args...) }
-func ErrForbidden(format string, args ...any) *BizError { return Forbidden(format, args...) }
-func ErrNotFound(format string, args ...any) *BizError { return NotFound(format, args...) }
-func ErrConflict(format string, args ...any) *BizError { return Conflict(format, args...) }
+func ErrForbidden(format string, args ...any) *BizError    { return Forbidden(format, args...) }
+func ErrNotFound(format string, args ...any) *BizError     { return NotFound(format, args...) }
+func ErrConflict(format string, args ...any) *BizError     { return Conflict(format, args...) }

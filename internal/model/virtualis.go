@@ -10,7 +10,6 @@ import (
 )
 
 const (
-	DriverMock  = "mock"
 	DriverLXC   = "lxc"
 	DriverIncus = "incus"
 	DriverQEMU  = "qemu"
@@ -18,15 +17,25 @@ const (
 )
 
 func AllDrivers() []string {
-	return []string{DriverAuto, DriverIncus, DriverQEMU, DriverLXC, DriverMock}
+	return []string{DriverAuto, DriverIncus, DriverQEMU, DriverLXC}
 }
 func ValidDriver(d string) bool {
 	switch d {
-	case DriverMock, DriverLXC, DriverIncus, DriverQEMU, DriverAuto:
+	case DriverLXC, DriverIncus, DriverQEMU, DriverAuto:
 		return true
 	}
 	return false
 }
+
+const (
+	// NetworkModeNAT 是 NAT 模式：实例经主机转发共享出口 IP。
+	NetworkModeNAT = "nat"
+	// NetworkModeDedicated 是独立 IP 模式：实例网卡直连主机网段。
+	// 仅当主机拥有至少 2 个 IPv4 地址时可用（创建时校验）。
+	NetworkModeDedicated = "dedicated"
+	// NetworkModeNone 关闭实例网络。
+	NetworkModeNone = "none"
+)
 
 const (
 	InstanceTypeContainer = "container"
@@ -73,20 +82,28 @@ type NetworkConfig struct {
 
 func NormalizeNetworkConfig(network NetworkConfig) (NetworkConfig, error) {
 	network.Mode = strings.ToLower(strings.TrimSpace(network.Mode))
+	// 历史数据里的 bridge 即独立 IP 模式，统一归一化。
+	if network.Mode == "bridge" {
+		network.Mode = NetworkModeDedicated
+	}
 	if network.Mode == "" {
-		network.Mode = "nat"
+		network.Mode = NetworkModeNAT
 	}
-	if network.Mode != "nat" && network.Mode != "bridge" && network.Mode != "none" {
-		return network, errors.New("网络模式必须是 nat、bridge 或 none")
+	if network.Mode != NetworkModeNAT && network.Mode != NetworkModeDedicated && network.Mode != NetworkModeNone {
+		return network, errors.New("网络模式必须是 nat、dedicated 或 none")
 	}
+	// Dedicated 下 Bridge 存放挂载目标：主机网桥或物理网卡名。
+	// 留空表示由被控自动选择第一个有地址的物理网卡。
 	network.Bridge = strings.TrimSpace(network.Bridge)
 	if len(network.Bridge) > 64 || strings.IndexFunc(network.Bridge, func(r rune) bool {
 		return !(r == '-' || r == '_' || r == '.' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))
 	}) >= 0 {
-		return network, errors.New("网桥名称格式无效")
+		return network, errors.New("网卡名称格式无效")
 	}
-	if network.Mode == "bridge" && network.Bridge == "" {
-		return network, errors.New("桥接网络必须填写网桥名称")
+	if network.IPv4 == "" && network.Gateway == "" && network.Mode == NetworkModeDedicated {
+		// 独立 IP 至少要声明地址或网关之一，避免创建后完全不可达。
+		// 两者都空时仍允许：由局域网 DHCP 分配，字段仅作展示。
+		_ = network
 	}
 	if network.MAC != "" {
 		mac, err := net.ParseMAC(network.MAC)
@@ -131,7 +148,7 @@ type Instance struct {
 	Base
 	Name        string        `gorm:"uniqueIndex;size:64;not null" json:"name"`
 	DisplayName string        `gorm:"size:128" json:"display_name"`
-	Driver      string        `gorm:"size:16;not null;default:mock" json:"driver"`
+	Driver      string        `gorm:"size:16;not null;default:auto" json:"driver"`
 	Type        string        `gorm:"size:16;not null;default:container" json:"type"`
 	Status      string        `gorm:"size:16;not null;default:pending" json:"status"`
 	ImageID     *uint         `gorm:"index" json:"image_id"`
@@ -152,7 +169,7 @@ type Image struct {
 	Name         string `gorm:"uniqueIndex;size:128;not null" json:"name"`
 	DisplayName  string `gorm:"size:128" json:"display_name"`
 	Description  string `gorm:"type:text" json:"description"`
-	Driver       string `gorm:"size:16;not null;default:mock" json:"driver"`
+	Driver       string `gorm:"size:16;not null;default:auto" json:"driver"`
 	Type         string `gorm:"size:16;not null;default:disk" json:"type"`
 	OSType       string `gorm:"size:64" json:"os_type"`
 	OSVersion    string `gorm:"size:64" json:"os_version"`

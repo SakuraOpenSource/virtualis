@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"strings"
 
 	"gorm.io/gorm"
 
 	"github.com/SakuraOpenSource/virtualis/internal/agentclient"
-	"github.com/SakuraOpenSource/virtualis/internal/driver"
 	"github.com/SakuraOpenSource/virtualis/internal/model"
 	"github.com/SakuraOpenSource/virtualis/internal/storage"
 )
@@ -25,9 +25,9 @@ type VirtualisService struct {
 	storage  *storage.Store
 }
 
-// NewVirtualisService keeps the old registry argument for source compatibility;
-// a master registry is intentionally not used for instance operations.
-func NewVirtualisService(db *gorm.DB, _ *driver.Registry, stores ...*storage.Store) *VirtualisService {
+// NewVirtualisService constructs the orchestration service. All driver
+// operations run on agents; the master only coordinates and persists.
+func NewVirtualisService(db *gorm.DB, stores ...*storage.Store) *VirtualisService {
 	var store *storage.Store
 	if len(stores) > 0 {
 		store = stores[0]
@@ -192,6 +192,27 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if err != nil {
 		return nil, BadRequest("%s", err.Error())
 	}
+	// 独立 IP 模式的两个闸门都在这里拦：
+	// 1) 主机必须有至少 2 个 IPv4 地址（一个归主机，才有富余给实例网段）；
+	// 2) 同一被控上不允许两个实例声明同一个独立 IP。
+	if network.Mode == model.NetworkModeDedicated {
+		summary, hnErr := client.HostNetwork(ctx)
+		if hnErr != nil {
+			return nil, agentFailure(hnErr)
+		}
+		if summary.IPv4Count < 2 {
+			return nil, BadRequest("独立 IP 模式要求被控主机拥有至少 2 个 IPv4 地址，当前仅 %d 个", summary.IPv4Count)
+		}
+	}
+	if network.IPv4 != "" {
+		taken, dupErr := s.dedicatedIPTaken(agent.ID, network.IPv4, 0)
+		if dupErr != nil {
+			return nil, dupErr
+		}
+		if taken {
+			return nil, Conflict("独立 IP %s 已被其它实例占用", network.IPv4)
+		}
+	}
 
 	var image *model.Image
 	if req.ImageID != nil {
@@ -244,6 +265,48 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 		return nil, err
 	}
 	return s.GetInstance(instance.ID)
+}
+
+// dedicatedIPTaken 报告同一被控上是否已有实例占用该独立 IP。
+// excludeID 用于更新场景预留；当前创建流程传 0。
+func (s *VirtualisService) dedicatedIPTaken(agentID uint, ip string, excludeID uint) (bool, error) {
+	ipAddr := net.ParseIP(strings.Split(ip, "/")[0])
+	if ipAddr == nil {
+		return false, BadRequest("IPv4 地址格式无效")
+	}
+	var items []model.Instance
+	if err := s.db.Where("agent_id = ? AND id <> ?", agentID, excludeID).Find(&items).Error; err != nil {
+		return false, err
+	}
+	for _, item := range items {
+		if item.Network.IPv4 == "" {
+			continue
+		}
+		other := net.ParseIP(strings.Split(item.Network.IPv4, "/")[0])
+		if other != nil && other.Equal(ipAddr) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// AgentHostNetwork 拉取被控主机的网卡清单，供创建实例时选择独立 IP
+// 的挂载接口，并判断该节点是否满足独立 IP 模式条件。
+func (s *VirtualisService) AgentHostNetwork(ctx context.Context, agentID uint) (*agentclient.HostNetworkSummary, error) {
+	agentSvc := NewAgentService(s.db)
+	agent, err := agentSvc.Get(agentID)
+	if err != nil {
+		return nil, err
+	}
+	client, err := s.agentClient(agent)
+	if err != nil {
+		return nil, err
+	}
+	summary, err := client.HostNetwork(ctx)
+	if err != nil {
+		return nil, agentFailure(err)
+	}
+	return summary, nil
 }
 
 func normalizeInstanceType(kind string) string {

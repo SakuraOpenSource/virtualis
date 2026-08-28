@@ -38,6 +38,17 @@ func (h *Handler) CreateAgent(c *gin.Context) {
 	respond(c, h.agentSetup(c, agent, token), nil)
 }
 
+// AgentHostNetwork 返回被控主机的网卡与地址清单，供独立 IP 模式选择
+// 挂载接口与判断该节点是否满足条件。
+func (h *Handler) AgentHostNetwork(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	summary, err := h.virtualis().AgentHostNetwork(c.Request.Context(), id)
+	respond(c, summary, err)
+}
+
 func (h *Handler) RotateAgentToken(c *gin.Context) {
 	id, ok := IDParam(c, "id")
 	if !ok {
@@ -231,7 +242,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$MASTER" || -z "$TOKEN" ]]; then
-  echo "用法: $0 --master http://MASTER:8080 --token TOKEN [--name node-01] [--mode 1-5]"
+  echo "用法: $0 --master http://MASTER:8080 --token TOKEN [--name node-01] [--mode 1-4]"
   exit 1
 fi
 NAME="${NAME:-node-$(hostname 2>/dev/null || true)}"
@@ -243,7 +254,6 @@ if [[ -z "$MODE" ]]; then
   echo "  2) 安装 Incus + Agent"
   echo "  3) 安装 LXC + Agent"
   echo "  4) 安装 QEMU + Agent"
-  echo "  5) 使用 Mock + Agent"
   if [[ -t 0 ]]; then read -r -p "选择 [1]: " MODE; else read -r -p "选择 [1]: " MODE < /dev/tty || MODE=1; fi
   MODE="${MODE:-1}"
 fi
@@ -254,7 +264,7 @@ run_root() {
 install_backend() {
   [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]] || { [[ "$1" == "1" || "$1" == "5" ]] || echo "macOS/Windows 请手动安装所选后端"; return; }
   case "$1" in
-    1|5) echo "跳过额外后端安装";;
+    1) echo "跳过额外后端安装";;
     2) if command -v apt-get >/dev/null 2>&1; then run_root apt-get update; run_root apt-get install -y incus; elif command -v dnf >/dev/null 2>&1; then run_root dnf install -y incus; else echo "请手动安装 Incus"; fi;;
     3) if command -v apt-get >/dev/null 2>&1; then run_root apt-get update; run_root apt-get install -y lxc lxc-templates; elif command -v dnf >/dev/null 2>&1; then run_root dnf install -y lxc lxc-templates; else echo "请手动安装 LXC"; fi;;
     4) if command -v apt-get >/dev/null 2>&1; then run_root apt-get update; run_root apt-get install -y qemu-kvm qemu-utils libvirt-clients libvirt-daemon-system; elif command -v dnf >/dev/null 2>&1; then run_root dnf install -y qemu-kvm qemu-img libvirt; else echo "请手动安装 QEMU/libvirt"; fi;;

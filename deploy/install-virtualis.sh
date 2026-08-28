@@ -65,7 +65,7 @@ Virtualis Linux 安装/升级脚本
   --role master|agent       安装角色；省略时交互选择
   --version VERSION         latest 或 v1.0.0，默认 latest
   --source auto|release|local
-  --backend LIST             mock,qemu,lxc,incus，逗号或空格分隔
+  --backend LIST             qemu,lxc,incus，逗号或空格分隔
   --update                   只升级已安装角色并保留现有配置
   --gh-proxy URL             GitHub 代理，例如 https://gh-proxy.org
                              下载时拼接为 URL/https://github.com/...
@@ -146,28 +146,26 @@ if [[ "$ROLE" == "master" ]]; then
 else
   if [[ -z "$BACKENDS" ]]; then
     if [[ "$UPDATE" -eq 1 ]]; then
-      BACKENDS="mock"
+      BACKENDS=""
     else
-      echo "请选择虚拟化后端（可多选，空格分隔；回车默认 Mock）："
-      echo "  1) Mock"
-      echo "  2) QEMU/libvirt"
-      echo "  3) LXC"
-      echo "  4) Incus"
+      echo "请选择虚拟化后端（可多选，空格分隔；回车默认 QEMU/libvirt）："
+      echo "  1) QEMU/libvirt"
+      echo "  2) LXC"
+      echo "  3) Incus"
       read -r -p "选择 [1]: " backend_choice < /dev/tty || backend_choice=1
       backend_choice="${backend_choice:-1}"
       for item in $backend_choice; do
         case "$item" in
-          1) BACKENDS+=" mock";;
-          2) BACKENDS+=" qemu";;
-          3) BACKENDS+=" lxc";;
-          4) BACKENDS+=" incus";;
+          1) BACKENDS+=" qemu";;
+          2) BACKENDS+=" lxc";;
+          3) BACKENDS+=" incus";;
           *) die "未知后端选项: $item";;
         esac
       done
     fi
   fi
   BACKENDS="$(printf '%s' "$BACKENDS" | tr ',' ' ' | xargs)"
-  [[ -n "$BACKENDS" ]] || BACKENDS="mock"
+  BACKENDS="${BACKENDS//mock/}"
 fi
 
 # GitHub 代理：交互询问 + 归一化校验
@@ -212,7 +210,6 @@ pkg_install() {
 install_backend() {
   local backend="$1"
   case "$backend" in
-    mock) info "Mock 无需安装额外依赖";;
     qemu)
       info "安装 QEMU/libvirt"
       case "$PM" in
@@ -479,7 +476,7 @@ display_backend="$BACKENDS"
 if [[ "$ROLE" == "master" ]]; then
   display_backend="无需（实例在被控创建）"
 elif [[ -z "$display_backend" ]]; then
-  display_backend="mock"
+  display_backend="未安装（仅运行被控）"
 fi
 
 cat <<EOF

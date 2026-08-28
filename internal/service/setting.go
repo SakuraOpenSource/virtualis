@@ -53,7 +53,7 @@ type VirtualisSettings struct {
 // DefaultVirtualisSettings returns sane defaults.
 func DefaultVirtualisSettings() VirtualisSettings {
 	return VirtualisSettings{
-		DefaultDriver:  "mock",
+		DefaultDriver:  "auto",
 		DefaultCPU:     2,
 		DefaultMemory:  1024,
 		DefaultDisk:    20,
@@ -196,10 +196,7 @@ func (s *SettingService) Virtualis() VirtualisSettings {
 func (s *SettingService) SaveVirtualis(in VirtualisSettings) (VirtualisSettings, error) {
 	in.DefaultDriver = strings.TrimSpace(strings.ToLower(in.DefaultDriver))
 	if in.DefaultDriver != "" && !model.ValidDriver(in.DefaultDriver) {
-		// Also allow mock/incus which are not in model.AllDrivers
-		if in.DefaultDriver != "mock" && in.DefaultDriver != "incus" {
-			return VirtualisSettings{}, BadRequest("invalid driver %q", in.DefaultDriver)
-		}
+		return VirtualisSettings{}, BadRequest("invalid driver %q", in.DefaultDriver)
 	}
 	if in.DefaultDriver == "" {
 		in.DefaultDriver = DefaultVirtualisSettings().DefaultDriver

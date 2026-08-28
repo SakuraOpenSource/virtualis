@@ -54,6 +54,23 @@ type Driver struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// HostInterface 是被控主机上的一个网卡，供独立 IP 模式选择挂载目标。
+type HostInterface struct {
+	Name  string   `json:"name"`
+	Kind  string   `json:"kind"` // bridge / physical / vlan / other
+	State string   `json:"state"`
+	MAC   string   `json:"mac,omitempty"`
+	IPv4  []string `json:"ipv4,omitempty"`
+	IPv6  []string `json:"ipv6,omitempty"`
+}
+
+// HostNetworkSummary 汇总被控主机网络。
+type HostNetworkSummary struct {
+	Interfaces []HostInterface `json:"interfaces"`
+	// IPv4Count 是全部非 lo 网卡的 IPv4 地址数；独立 IP 模式要求 >= 2。
+	IPv4Count int `json:"ipv4_count"`
+}
+
 type Metrics struct {
 	CPUPercent     float64   `json:"cpu_percent"`
 	MemoryUsedMB   int64     `json:"memory_used_mb"`
@@ -179,6 +196,21 @@ func (c *Client) Drivers(ctx context.Context) ([]Driver, error) {
 		return nil, err
 	}
 	return out.Items, nil
+}
+
+// HostNetwork 拉取被控主机的网卡与地址清单。
+func (c *Client) HostNetwork(ctx context.Context) (*HostNetworkSummary, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, "host/network", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Network HostNetworkSummary `json:"network"`
+	}
+	if err := c.do(req, &out); err != nil {
+		return nil, err
+	}
+	return &out.Network, nil
 }
 
 func (c *Client) CreateInstance(ctx context.Context, instance Instance, image *Image, imageFile io.Reader, filename string) (Instance, error) {

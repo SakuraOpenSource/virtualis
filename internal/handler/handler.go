@@ -50,7 +50,7 @@ func (h *Handler) captchaSvc() *service.CaptchaService {
 func (h *Handler) apiKeys() *service.APIKeyService { return service.NewAPIKeyService(h.db()) }
 
 func (h *Handler) virtualis() *service.VirtualisService {
-	return service.NewVirtualisService(h.db(), nil, h.storage)
+	return service.NewVirtualisService(h.db(), h.storage)
 }
 
 func (h *Handler) agents() *service.AgentService { return service.NewAgentService(h.db()) }

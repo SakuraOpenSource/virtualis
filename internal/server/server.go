@@ -95,6 +95,7 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	admin.GET("/settings/captcha", h.CaptchaSettings)
 	admin.PUT("/settings/captcha", h.UpdateCaptchaSettings)
 	admin.GET("/agents", h.Agents)
+	admin.GET("/agents/:id/network", h.AgentHostNetwork)
 	admin.POST("/agents", h.CreateAgent)
 	admin.POST("/agents/:id/rotate-token", h.RotateAgentToken)
 	admin.DELETE("/agents/:id", h.DeleteAgent)

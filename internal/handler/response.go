@@ -11,16 +11,16 @@ type Page = httpx.Page
 
 // Re-export common response helpers so calls inside handler stay concise.
 var (
-	Fail       = httpx.Fail
-	BadRequest = httpx.BadRequest
+	Fail         = httpx.Fail
+	BadRequest   = httpx.BadRequest
 	Unauthorized = httpx.Unauthorized
-	Forbidden  = httpx.Forbidden
-	NotFound   = httpx.NotFound
-	Conflict   = httpx.Conflict
-	Internal   = httpx.Internal
-	OK         = httpx.OK
-	Pagination = httpx.Pagination
-	IDParam    = httpx.IDParam
+	Forbidden    = httpx.Forbidden
+	NotFound     = httpx.NotFound
+	Conflict     = httpx.Conflict
+	Internal     = httpx.Internal
+	OK           = httpx.OK
+	Pagination   = httpx.Pagination
+	IDParam      = httpx.IDParam
 )
 
 // bindJSON decodes JSON body into dst and writes 400 on failure.
