@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -299,8 +300,14 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if !model.ValidInstanceStatus(instance.Status) || instance.Status == model.InstanceStatusCreating {
 		instance.Status = model.InstanceStatusStopped
 	}
+	// map 形式的 Updates 不会触发字段上的 JSON 序列化器，NetworkConfig
+	// 结构体必须先自己序列化成字符串才能写进 TEXT 列。
+	networkJSON, mErr := json.Marshal(instance.Network)
+	if mErr != nil {
+		return nil, mErr
+	}
 	if err := s.db.Model(instance).Updates(map[string]any{
-		"status": instance.Status, "driver": instance.Driver, "network": instance.Network,
+		"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON),
 	}).Error; err != nil {
 		return nil, err
 	}
