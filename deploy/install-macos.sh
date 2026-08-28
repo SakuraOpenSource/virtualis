@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 # Virtualis macOS 部署脚本
-# 支持选择 QEMU / Incus / LXC / Mock，并安装 Virtualis
+# 支持选择 QEMU / Incus / LXC，并安装 Virtualis
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -29,16 +29,15 @@ echo -e "${YELLOW}已选择: $ROLE${NC}"
 
 echo ""
 echo "选择虚拟化后端 (可多选，空格分隔):"
-echo "  1) Mock   - 模拟"
-echo "  2) QEMU   - qemu (brew install qemu)"
-echo "  3) LXC    - lxc (brew install lxc) - macOS 支持有限"
-echo "  4) Incus  - incus (brew install incus) - 需 Linux 容器支持"
+echo "  1) QEMU   - qemu (brew install qemu)"
+echo "  2) LXC    - lxc (brew install lxc) - macOS 支持有限"
+echo "  3) Incus  - incus (brew install incus) - 需 Linux 容器支持"
 read -p "你的选择 [1]: " sel
 sel=${sel:-1}
 
 need_qemu=0; need_lxc=0; need_incus=0
 for s in $sel; do
-  case "$s" in 2) need_qemu=1;; 3) need_lxc=1;; 4) need_incus=1;; esac
+  case "$s" in 1) need_qemu=1;; 2) need_lxc=1;; 3) need_incus=1;; esac
 done
 
 if [ "$need_qemu" -eq 1 ]; then
@@ -47,11 +46,11 @@ if [ "$need_qemu" -eq 1 ]; then
 fi
 if [ "$need_lxc" -eq 1 ]; then
   echo -e "${GREEN}安装 LXC...${NC}"
-  brew install lxc || echo -e "${YELLOW}LXC 在 macOS 上功能受限，建议使用 QEMU/Incus (Linux) 或 Mock${NC}"
+  brew install lxc || echo -e "${YELLOW}LXC 在 macOS 上功能受限，建议使用 QEMU/Incus (Linux)${NC}"
 fi
 if [ "$need_incus" -eq 1 ]; then
   echo -e "${GREEN}安装 Incus...${NC}"
-  brew install incus || echo -e "${YELLOW}Incus 在 macOS 上需 Linux 宿主机，macOS 建议 Mock/QEMU${NC}"
+  brew install incus || echo -e "${YELLOW}Incus 在 macOS 上需 Linux 宿主机，macOS 建议 QEMU${NC}"
 fi
 
 echo ""

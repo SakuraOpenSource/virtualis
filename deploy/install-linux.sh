@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 # Virtualis Linux 部署脚本
-# 支持选择安装 QEMU / LXC / Incus / Mock，并安装 Virtualis 主控或被控
+# 支持选择安装 QEMU / LXC / Incus，并安装 Virtualis 主控或被控
 # 用法: sudo bash install-linux.sh  或  bash install-linux.sh --agent
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -57,21 +57,19 @@ echo -e "${YELLOW}已选择: $ROLE${NC}"
 
 echo ""
 echo "请选择要安装的虚拟化后端 (可多选，空格分隔):"
-echo "  1) Mock   - 纯内存模拟，无需宿主机依赖，适合演示"
-echo "  2) QEMU   - qemu-kvm / libvirt，适合完整虚拟机"
-echo "  3) LXC    - lxc/lxc-templates，适合容器"
-echo "  4) Incus  - incus (同时支持容器与虚拟机，推荐)"
-echo "  例: 输入 '2 4' 安装 QEMU+Incus，回车默认 1"
+echo "  1) QEMU   - qemu-kvm / libvirt，适合完整虚拟机"
+echo "  2) LXC    - lxc/lxc-templates，适合容器"
+echo "  3) Incus  - incus (同时支持容器与虚拟机，推荐)"
+echo "  例: 输入 '1 3' 安装 QEMU+Incus，回车默认 1"
 read -p "你的选择 [1]: " sel
 sel=${sel:-1}
 
 need_qemu=0; need_lxc=0; need_incus=0
 for s in $sel; do
   case "$s" in
-    1) : ;;
-    2) need_qemu=1 ;;
-    3) need_lxc=1 ;;
-    4) need_incus=1 ;;
+    1) need_qemu=1 ;;
+    2) need_lxc=1 ;;
+    3) need_incus=1 ;;
   esac
 done
 

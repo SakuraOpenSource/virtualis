@@ -1,6 +1,6 @@
 @echo off
 REM Virtualis Windows 部署批处理
-REM 支持选择 QEMU / Mock，并安装 Virtualis 主控/被控
+REM 支持选择 QEMU，并安装 Virtualis 主控/被控
 REM 需以管理员身份运行
 
 setlocal enabledelayedexpansion
@@ -25,15 +25,14 @@ if "%ROLE%"=="agent" (
 
 echo.
 echo 选择虚拟化后端 (可多选，空格分隔):
-echo   1) Mock   - 模拟 (无需安装)
-echo   2) QEMU   - qemu (通过 winget/choco 安装)
-echo   3) LXC    - 在 Windows 上不可用，建议 WSL2
-echo   4) Incus  - 在 Windows 上不可用，建议 WSL2/Linux
-echo   例: 输入 2 安装 QEMU，回车默认 1
+echo   1) QEMU   - qemu (通过 winget/choco 安装)
+echo   2) LXC    - 在 Windows 上不可用，建议 WSL2
+echo   3) Incus  - 在 Windows 上不可用，建议 WSL2/Linux
+echo   例: 输入 1 安装 QEMU，回车默认 1
 set /p sel="你的选择 [1]: "
 if "%sel%"=="" set sel=1
 
-echo %sel% | findstr "2" >nul
+echo %sel% | findstr "1" >nul
 if %errorlevel%==0 (
   echo 安装 QEMU...
   where winget >nul 2>&1
@@ -48,15 +47,15 @@ if %errorlevel%==0 (
     )
   )
 ) else (
-  echo 跳过 QEMU 安装 (Mock 模式)
+  echo 跳过 QEMU 安装
 )
 
-echo %sel% | findstr "3" >nul
+echo %sel% | findstr "2" >nul
 if %errorlevel%==0 (
   echo 提示: LXC 在 Windows 原生不支持，建议使用 WSL2 + Linux 发行版
 )
 
-echo %sel% | findstr "4" >nul
+echo %sel% | findstr "3" >nul
 if %errorlevel%==0 (
   echo 提示: Incus 在 Windows 原生不支持，建议使用 WSL2 + Linux
 )

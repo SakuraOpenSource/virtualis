@@ -63,9 +63,8 @@ deploy\install.bat --agent
 脚本会交互式询问：
 
 1. **部署角色**：主控（含前端） / 被控（仅 Go 后端）
-2. **虚拟化后端**：可多选 `Mock/QEMU/LXC/Incus`
-   - `Mock` 无需依赖，适合演示
-   - `QEMU` 需 `qemu-kvm` / `libvirt`
+2. **虚拟化后端**：可多选 `QEMU/LXC/Incus`
+   - `QEMU` 需 `qemu-kvm` / `libvirt`，支持 VNC 与 QCOW2/ISO 挂载
    - `LXC` 需 `lxc`
    - `Incus` 推荐，同时支持容器与虚拟机（需 `incus`）
 
@@ -84,21 +83,21 @@ deploy\install.bat --agent
 - 主控：`virtualis -data /var/lib/virtualis` → 访问 `http://IP:8080` 完成安装
 - 被控：`virtualis-agent --master http://MASTER:8080 --token <token> --name node-01 --listen :8081`
 
-## 一键安装 QEMU/LXC/Incus/Mock 被控脚本在哪里
+## 一键安装 QEMU/LXC/Incus 被控脚本在哪里
 
-- **被控专用（已整合至 Agent）**：`virtualis-agent/install.sh` – 内置可选，交互式 5 选 1 后直接接入主控
+- **被控专用（已整合至 Agent）**：`virtualis-agent/install.sh` – 内置可选，交互式 4 选 1 后直接接入主控
   ```bash
   sudo bash virtualis-agent/install.sh --master http://MASTER:8080 --token <token> --name node-01 --mode 2
-  # 或交互式（提示 1 仅 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent / 5 Mock+Agent）
+  # 或交互式（提示 1 仅 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent）
   sudo bash virtualis-agent/install.sh
   ```
-  可选择：`1 仅安装 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent / 5 Mock+Agent`
-- **通用**：`deploy/install-linux.sh --agent` / `install-macos.sh --agent` / `install.bat --agent` 仍支持多选 `Mock/QEMU/LXC/Incus`，内部复用同一后端安装逻辑
+  可选择：`1 仅安装 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent`
+- **通用**：`deploy/install-linux.sh --agent` / `install-macos.sh --agent` / `install.bat --agent` 仍支持多选 `QEMU/LXC/Incus`，内部复用同一后端安装逻辑
 - 主控也可在 `deploy/install-linux.sh` 直接选后端一并安装
 
 ## 目录
 
 - `install-linux.sh` – Linux 主控/被控通用（apt/dnf/yum/pacman/apk）
-- `virtualis-agent/install.sh` – Linux 被控专用一键（内置 1 仅Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent / 5 Mock+Agent）
+- `virtualis-agent/install.sh` – Linux 被控专用一键（内置 1 仅Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent）
 - `install-macos.sh` – macOS 主控/被控（Homebrew）
-- `install.bat` – Windows 主控/被控（winget/choco，QEMU/Mock；LXC/Incus 提示 WSL2）
+- `install.bat` – Windows 主控/被控（winget/choco 安装 QEMU；LXC/Incus 提示 WSL2）
