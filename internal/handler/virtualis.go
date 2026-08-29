@@ -1,14 +1,18 @@
 package handler
 
 import (
+	"io"
+	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 
 	"github.com/SakuraOpenSource/virtualis/internal/model"
 	"github.com/SakuraOpenSource/virtualis/internal/service"
@@ -222,8 +226,19 @@ func (h *Handler) InstanceVNC(c *gin.Context) {
 	respond(c, gin.H{"vnc": vnc}, err)
 }
 
-// InstanceVNCWebSocket proxies the browser's noVNC WebSocket to the assigned
-// agent. The agent token is injected server-side and never exposed to Vue.
+// vncUpgrader 与被控端保持一致：noVNC 走 binary 子协议；来源不校验，因为
+// 鉴权已由 cookie 中间件完成，且前后端分离部署时 Origin 是前端域名。
+var vncUpgrader = websocket.Upgrader{
+	ReadBufferSize:  32 << 10,
+	WriteBufferSize: 32 << 10,
+	Subprotocols:    []string{"binary"},
+	CheckOrigin:     func(*http.Request) bool { return true },
+}
+
+// InstanceVNCWebSocket 把浏览器的 noVNC WebSocket 中继到所属被控。
+// 不用 httputil.ReverseProxy：它劫持连接后完全黑盒，"连上又断"这类问题
+// 看不出是浏览器→主控还是主控→被控哪一跳先断；手写双向拷贝与被控端
+// 日志对称，两个方向的字节数和关闭原因都直接进 journal。
 func (h *Handler) InstanceVNCWebSocket(c *gin.Context) {
 	id, ok := IDParam(c, "id")
 	if !ok {
@@ -243,22 +258,91 @@ func (h *Handler) InstanceVNCWebSocket(c *gin.Context) {
 		Internal(c, "被控 endpoint 无效")
 		return
 	}
-	proxy := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			req.URL.Scheme = target.Scheme
-			req.URL.Host = target.Host
-			req.URL.Path = "/api/instances/" + c.Param("id") + "/vnc/ws"
-			req.URL.RawPath = ""
-			query := req.URL.Query()
-			query.Set("token", instance.Agent.Token)
-			query.Set("name", instance.Name)
-			query.Set("driver", instance.Driver)
-			req.URL.RawQuery = query.Encode()
-			req.Host = target.Host
-			req.Header.Set("X-Agent-Token", instance.Agent.Token)
-		},
+	browser, err := vncUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		return // 升级失败时响应已写出
 	}
-	proxy.ServeHTTP(c.Writer, c.Request)
+	defer browser.Close()
+	browser.SetReadLimit(16 << 20)
+
+	agentURL := url.URL{Scheme: "ws", Host: target.Host, Path: "/api/instances/" + c.Param("id") + "/vnc/ws"}
+	if target.Scheme == "https" {
+		agentURL.Scheme = "wss"
+	}
+	query := url.Values{}
+	query.Set("token", instance.Agent.Token)
+	query.Set("name", instance.Name)
+	query.Set("driver", instance.Driver)
+	agentURL.RawQuery = query.Encode()
+	header := http.Header{}
+	header.Set("X-Agent-Token", instance.Agent.Token)
+
+	dialer := websocket.Dialer{ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10, HandshakeTimeout: 10 * time.Second}
+	agent, resp, err := dialer.Dial(agentURL.String(), header)
+	if err != nil {
+		log.Printf("VNC 代理 实例 %d 连接被控 %s 失败: %v", id, target.Host, err)
+		_ = browser.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "连接被控节点失败"),
+			time.Now().Add(time.Second))
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return
+	}
+	defer agent.Close()
+	log.Printf("VNC 代理 实例 %d 已建立: 浏览器 %s ↔ 被控 %s", id, c.ClientIP(), target.Host)
+
+	// 一侧断开后立即关掉两侧连接，让对向拷贝马上退出而不是等对端超时。
+	var bytesToAgent, bytesToBrowser atomic.Uint64
+	result := make(chan error, 2)
+	go func() { // 浏览器 → 被控
+		for {
+			messageType, reader, readErr := browser.NextReader()
+			if readErr != nil {
+				result <- readErr
+				return
+			}
+			writer, writeErr := agent.NextWriter(messageType)
+			if writeErr != nil {
+				result <- writeErr
+				return
+			}
+			n, copyErr := io.Copy(writer, reader)
+			bytesToAgent.Add(uint64(n))
+			_ = writer.Close()
+			if copyErr != nil {
+				result <- copyErr
+				return
+			}
+		}
+	}()
+	go func() { // 被控 → 浏览器
+		for {
+			messageType, reader, readErr := agent.NextReader()
+			if readErr != nil {
+				result <- readErr
+				return
+			}
+			writer, writeErr := browser.NextWriter(messageType)
+			if writeErr != nil {
+				result <- writeErr
+				return
+			}
+			n, copyErr := io.Copy(writer, reader)
+			bytesToBrowser.Add(uint64(n))
+			_ = writer.Close()
+			if copyErr != nil {
+				result <- copyErr
+				return
+			}
+		}
+	}()
+	closeErr := <-result
+	_ = browser.Close()
+	_ = agent.Close()
+	<-result
+	log.Printf("VNC 代理 实例 %d 断开: %v（浏览器→QEMU %d B / QEMU→浏览器 %d B）",
+		id, closeErr, bytesToAgent.Load(), bytesToBrowser.Load())
 }
 
 // Drivers returns available virtualization drivers and their probe status.
