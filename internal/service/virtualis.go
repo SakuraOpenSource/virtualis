@@ -427,7 +427,13 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 		return nil, agentFailure(err)
 	}
 	applyWireInstance(instance, remote)
-	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver}).Error; err != nil {
+	mergeRemoteNetwork(instance, remote)
+	// map 形式的 Updates 不触发字段上的 JSON 序列化器，网络配置先自行序列化。
+	networkJSON, mErr := json.Marshal(instance.Network)
+	if mErr != nil {
+		return nil, mErr
+	}
+	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON)}).Error; err != nil {
 		return nil, err
 	}
 	return s.GetInstance(instance.ID)
@@ -450,10 +456,15 @@ func (s *VirtualisService) RefreshStatus(ctx context.Context, id uint) (*model.I
 		return nil, agentFailure(err)
 	}
 	applyWireInstance(instance, remote)
+	mergeRemoteNetwork(instance, remote)
 	if !model.ValidInstanceStatus(instance.Status) {
 		return nil, BadRequest("被控返回了无效实例状态")
 	}
-	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver}).Error; err != nil {
+	networkJSON, mErr := json.Marshal(instance.Network)
+	if mErr != nil {
+		return nil, mErr
+	}
+	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON)}).Error; err != nil {
 		return nil, err
 	}
 	return s.GetInstance(id)
@@ -787,16 +798,20 @@ func toWireMappings(items []model.NATMapping) []agentclient.NATMapping {
 	return out
 }
 
-// mergeRemoteNetwork 把被控回填的 NAT 保留地址/派生 MAC 合并进实例，
-// 只在 NAT 模式且本地为空时填充，避免覆盖用户的独立 IP 声明。
+// mergeRemoteNetwork 把被控回填的 NAT 地址/MAC 合并进实例。
+//
+// NAT 模式的 MAC 与 IPv4 是被控派生并维护的系统数据（静态保留 IP、按域里
+// 真实网卡对账后的结果），被控上报的非空值是权威值，直接采纳——否则历史
+// 实例的陈旧记录永远得不到纠正；被控未上报时保留主控已有值。独立 IP 模式
+// 的字段是用户声明，仍只在为空时填充。
 func mergeRemoteNetwork(instance *model.Instance, remote agentclient.Instance) {
 	if instance.Network.Mode != model.NetworkModeNAT {
 		return
 	}
-	if instance.Network.IPv4 == "" && remote.Network.IPv4 != "" {
+	if remote.Network.IPv4 != "" {
 		instance.Network.IPv4 = remote.Network.IPv4
 	}
-	if instance.Network.MAC == "" && remote.Network.MAC != "" {
+	if remote.Network.MAC != "" {
 		instance.Network.MAC = remote.Network.MAC
 	}
 }
