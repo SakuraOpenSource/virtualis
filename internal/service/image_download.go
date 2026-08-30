@@ -190,7 +190,12 @@ func tunaListDirs(ctx context.Context, base string) ([]string, error) {
 	var dirs []string
 	for _, m := range tunaDirPattern.FindAllSubmatch(raw, -1) {
 		name := string(m[1])
+		// 页脚外链（https://...）和站点素材不是目录：真实目录名只含
+		// 字母数字与 -_%（发行版、amd64、cloud、20260829_05%3A24）。
 		if name == "" || name == ".." || name == "." || seen[name] {
+			continue
+		}
+		if strings.Contains(name, "://") || strings.Contains(name, ".") {
 			continue
 		}
 		seen[name] = true
