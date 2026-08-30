@@ -242,7 +242,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$MASTER" || -z "$TOKEN" ]]; then
-  echo "用法: $0 --master http://MASTER:8080 --token TOKEN [--name node-01] [--mode 1-4]"
+  echo "用法: $0 --master http://MASTER:8080 --token TOKEN [--name node-01] [--mode 1-3]"
   exit 1
 fi
 NAME="${NAME:-node-$(hostname 2>/dev/null || true)}"
@@ -252,8 +252,7 @@ if [[ -z "$MODE" ]]; then
   echo "选择被控后端："
   echo "  1) 仅安装 Agent"
   echo "  2) 安装 Incus + Agent"
-  echo "  3) 安装 LXC + Agent"
-  echo "  4) 安装 QEMU + Agent"
+  echo "  3) 安装 QEMU + Agent"
   if [[ -t 0 ]]; then read -r -p "选择 [1]: " MODE; else read -r -p "选择 [1]: " MODE < /dev/tty || MODE=1; fi
   MODE="${MODE:-1}"
 fi
@@ -266,8 +265,7 @@ install_backend() {
   case "$1" in
     1) echo "跳过额外后端安装";;
     2) if command -v apt-get >/dev/null 2>&1; then run_root apt-get update; run_root apt-get install -y incus; elif command -v dnf >/dev/null 2>&1; then run_root dnf install -y incus; else echo "请手动安装 Incus"; fi;;
-    3) if command -v apt-get >/dev/null 2>&1; then run_root apt-get update; run_root apt-get install -y lxc lxc-templates; elif command -v dnf >/dev/null 2>&1; then run_root dnf install -y lxc lxc-templates; else echo "请手动安装 LXC"; fi;;
-    4) if command -v apt-get >/dev/null 2>&1; then run_root apt-get update; run_root apt-get install -y qemu-kvm qemu-utils libvirt-clients libvirt-daemon-system; elif command -v dnf >/dev/null 2>&1; then run_root dnf install -y qemu-kvm qemu-img libvirt; else echo "请手动安装 QEMU/libvirt"; fi;;
+    3) if command -v apt-get >/dev/null 2>&1; then run_root apt-get update; run_root apt-get install -y qemu-kvm qemu-utils libvirt-clients libvirt-daemon-system; elif command -v dnf >/dev/null 2>&1; then run_root dnf install -y qemu-kvm qemu-img libvirt; else echo "请手动安装 QEMU/libvirt"; fi;;
     *) echo "未知模式 $1，按仅 Agent 处理";;
   esac
 }

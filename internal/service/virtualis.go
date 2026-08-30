@@ -655,8 +655,8 @@ func (s *VirtualisService) UploadImage(req UploadImageRequest, filename string, 
 		return nil, err
 	}
 	kind := normalizeImageType(req.Type, filename, "")
-	if kind == model.ImageTypeISO && driverName == model.DriverLXC {
-		return nil, BadRequest("LXC 不支持 ISO 镜像")
+	if kind == model.ImageTypeISO && driverName == model.DriverIncus {
+		return nil, BadRequest("容器不支持 ISO 镜像")
 	}
 	filePath, size, mimeType, checksum, err := s.storage.SaveNamed("uploads", filename, r, maxImageUploadSize)
 	if err != nil {

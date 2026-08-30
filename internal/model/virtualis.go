@@ -10,18 +10,17 @@ import (
 )
 
 const (
-	DriverLXC   = "lxc"
 	DriverIncus = "incus"
 	DriverQEMU  = "qemu"
 	DriverAuto  = "auto"
 )
 
 func AllDrivers() []string {
-	return []string{DriverAuto, DriverIncus, DriverQEMU, DriverLXC}
+	return []string{DriverAuto, DriverIncus, DriverQEMU}
 }
 func ValidDriver(d string) bool {
 	switch d {
-	case DriverLXC, DriverIncus, DriverQEMU, DriverAuto:
+	case DriverIncus, DriverQEMU, DriverAuto:
 		return true
 	}
 	return false
