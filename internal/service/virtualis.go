@@ -289,7 +289,10 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if reader != nil {
 		defer reader.Close()
 	}
-	remote, remoteErr := client.CreateInstance(ctx, toWireInstance(instance, image), toWireImage(image), reader, filename)
+	wireInstance := toWireInstance(instance, image)
+	// 面板生成的初始 root 密码只随创建请求下发一次。
+	wireInstance.RootPassword = instance.LoadSSHPassword()
+	remote, remoteErr := client.CreateInstance(ctx, wireInstance, toWireImage(image), reader, filename)
 	if remoteErr != nil {
 		_ = s.db.Model(instance).Update("status", model.InstanceStatusError).Error
 		instance.Status = model.InstanceStatusError

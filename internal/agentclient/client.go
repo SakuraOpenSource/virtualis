@@ -39,6 +39,8 @@ type Instance struct {
 	Image       *Image              `json:"image,omitempty"`
 	// NATMappings 是期望清单，被控开机时应用 DNAT、关机/删除时清除。
 	NATMappings []NATMapping `json:"nat_mappings,omitempty"`
+	// RootPassword 只随创建请求下发一次（写盘/初始 chpasswd 用）。
+	RootPassword string `json:"root_password,omitempty"`
 }
 
 // Image contains the metadata an agent needs to attach an image locally.
