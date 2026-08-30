@@ -1,0 +1,2 @@
+- refactor: 移除 LXC 驱动选项（安装脚本/驱动校验/前端选项同步）
+- refactor: 移除 Mock 与主控 legacy 驱动，网络模型支持独立 IP

@@ -1,0 +1,12 @@
+- fix: Incus 分割镜像元数据改用 incus.tar.xz（meta.tar.xz 是老 LXC 格式）
+- fix: TUNA 构建目录不再二次 URL 编码
+- fix: TUNA 目录解析过滤页脚外链
+- fix: sqlite 相对路径锚定 -data 目录，杜绝按启动目录分叉数据库
+- fix: 状态同步/电源操作合并被控回传的 NAT 地址与 MAC
+- fix: 创建实例后回写 network 列的 JSON 序列化
+- fix: 注册 401 提示改为可操作的修复指引
+- fix: 镜像离线存储到 data 文件夹
+- fix: 修复安装脚本下载与管理员登录恢复
+- fix(install): Agent 改用独立仓库 SakuraOpenSource/virtualis-agent
+- fix(install): 避免 /etc/os-release 覆盖 VERSION 导致下载 URL 异常
+- fix(install): 主控无需选择/安装虚拟化后端，修复下载 URL 异常

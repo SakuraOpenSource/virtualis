@@ -98,12 +98,89 @@ jobs:
           cat SHA256SUMS
           ls -lh
 
+      - name: Generate release notes
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          # 上一个 tag：按创建时间取当前 tag 之前的最近一个；找不到则全量历史。
+          PREV="$(git tag --sort=-creatordate | grep -v "^${TAG}$" | head -n 1 || true)"
+          if [ -n "$PREV" ]; then RANGE="$PREV..$TAG"; else RANGE="$TAG"; fi
+          echo "release range: $RANGE"
+
+          # 逐行读 (hash<TAB>title)，按 conventional commit 前缀归类：
+          # feat/fix/ci(build)/refactor/perf/docs/test，带 "!" 视为不兼容变更，
+          # 其余归入「其他变更」；merge 与 revert 跳过。
+          git log --no-merges --format='%H%x09%s' $RANGE | head -n 500 > /tmp/commits.tsv
+
+          match_prefix() {
+            # $1=title，输出命中的分类 key（空表示未命中）
+            title="$1"
+            case "$title" in
+              feat\!*) echo breaking;; feat\!*|feat:*|feat\(*) echo feat;;
+              fix\!*) echo breaking;; fix:*|fix\(*|hotfix:*) echo fix;;
+              ci\!*) echo breaking;; ci:*|ci\(*) echo ci;;
+              build\!*) echo breaking;; build:*|build\(*) echo ci;;
+              refactor\!*) echo breaking;; refactor:*|refactor\(*) echo refactor;;
+              perf\!*) echo breaking;; perf:*|perf\(*) echo perf;;
+              docs\!*) echo breaking;; docs:*|docs\(*|doc:*) echo docs;;
+              test\!*) echo breaking;; test:*|test\(*) echo test;;
+              *\!:*|*:\!*) echo breaking;;
+              Revert*|Merge*) echo skip;;
+              *) echo other;;
+            esac
+          }
+
+          : > feat.txt; : > fix.txt; : > ci.txt; : > refactor.txt
+          : > perf.txt; : > docs.txt; : > test.txt; : > breaking.txt; : > other.txt
+          while IFS="$(printf '\t')" read -r hash title; do
+            [ -n "$hash" ] || continue
+            key="$(match_prefix "$title")"
+            case "$key" in
+              feat) echo "- $title" >> feat.txt;;
+              fix) echo "- $title" >> fix.txt;;
+              ci) echo "- $title" >> ci.txt;;
+              refactor) echo "- $title" >> refactor.txt;;
+              perf) echo "- $title" >> perf.txt;;
+              docs) echo "- $title" >> docs.txt;;
+              test) echo "- $title" >> test.txt;;
+              breaking) echo "- $title" >> breaking.txt;;
+              other) echo "- $title" >> other.txt;;
+            esac
+          done < /tmp/commits.tsv
+
+          {
+            echo "## Virtualis $TAG"
+            echo
+            emit() {
+              local file="$1" label="$2"
+              if [ -s "$file" ]; then
+                echo "### $label"
+                cat "$file"
+                echo
+              fi
+            }
+            emit breaking.txt "⚠️ 不兼容变更"
+            emit feat.txt "✨ 新特性"
+            emit fix.txt "🐛 问题修复"
+            emit ci.txt "🔄 CI / 构建"
+            emit refactor.txt "♻️ 重构"
+            emit perf.txt "⚡ 性能优化"
+            emit docs.txt "📝 文档"
+            emit test.txt "✅ 测试"
+            emit other.txt "📦 其他变更"
+
+            REPO_URL="$(git remote get-url origin 2>/dev/null | sed -E 's#(git@|https://)github.com[:/]##; s#\.git$##')"
+            if [ -n "$REPO_URL" ] && [ -n "$PREV" ]; then
+              echo "**Full Changelog**: https://github.com/$REPO_URL/compare/$PREV...$TAG"
+            fi
+          } > release_notes.md
+          cat release_notes.md
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: ${{ inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          body_path: release_notes.md
           files: |
             bin/*
             bin/SHA256SUMS
