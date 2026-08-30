@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -101,15 +102,33 @@ jobs:
       - name: Generate release notes
         run: |
           TAG="${{ inputs.tag || github.ref_name }}"
-          # 上一个 tag：按创建时间取当前 tag 之前的最近一个；找不到则全量历史。
-          PREV="$(git tag --sort=-creatordate | grep -v "^${TAG}$" | head -n 1 || true)"
-          if [ -n "$PREV" ]; then RANGE="$PREV..$TAG"; else RANGE="$TAG"; fi
+          # TAG 的落点：tag push 时 TAG 已存在；workflow_dispatch 由 Release 步骤
+          # 新建 tag，此刻仓库里还没有它 —— 用当前 checkout 的提交兜底（正是
+          # 稍后要打 tag 的提交）。否则 git log 的区间解析会报 unknown revision，
+          # 且失败会被管道吞掉，发布出去就是一份没有正文的空 release。
+          if git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null 2>&1; then
+            TAG_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          else
+            echo "tag ${TAG} 不存在（dispatch 新建 tag 场景），使用当前 HEAD $(git rev-parse --short HEAD)"
+            TAG_SHA="$(git rev-parse HEAD)"
+          fi
+          # 上一个 tag：取 TAG 落点祖先链上最近的一个，排除 TAG 本身。
+          PREV="$(git tag --sort=-creatordate --merged "$TAG_SHA" | grep -vx "$TAG" | head -n 1 || true)"
+          if [ -n "$PREV" ]; then RANGE="$PREV..$TAG_SHA"; else RANGE="$TAG_SHA"; fi
           echo "release range: $RANGE"
 
           # 逐行读 (hash<TAB>title)，按 conventional commit 前缀归类：
           # feat/fix/ci(build)/refactor/perf/docs/test，带 "!" 视为不兼容变更，
           # 其余归入「其他变更」；merge 与 revert 跳过。
-          git log --no-merges --format='%H%x09%s' $RANGE | head -n 500 > /tmp/commits.tsv
+          # git log 单独执行：区间解析失败要显式回退，绝不能带着空正文发布。
+          if git log --no-merges --format='%H%x09%s' $RANGE > /tmp/commits.tsv 2>/tmp/commits.err; then
+            : # 区间有效
+          else
+            echo "git log 区间失败：$(head -n 1 /tmp/commits.err)，回退到该落点最近 50 条提交"
+            git log --no-merges --format='%H%x09%s' -n 50 "$TAG_SHA" > /tmp/commits.tsv
+          fi
+          head -n 500 /tmp/commits.tsv > /tmp/commits.head && mv /tmp/commits.head /tmp/commits.tsv
+          echo "commits collected: $(wc -l < /tmp/commits.tsv)"
 
           match_prefix() {
             # $1=title，输出命中的分类 key（空表示未命中）
