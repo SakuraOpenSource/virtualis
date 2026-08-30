@@ -111,15 +111,15 @@ func (s *VirtualisService) ImagePresets(ctx context.Context, driver, distro, rel
 			return map[string]any{"items": incusDistroPresets()}, nil
 		}
 		if release == "" {
-			return tunaSubDirs(ctx, TUNAIncusBase+"/"+url.PathEscape(distro))
+			return tunaSubDirs(ctx, TUNAIncusBase+"/"+distro)
 		}
 		if arch == "" {
-			return tunaSubDirs(ctx, TUNAIncusBase+"/"+url.PathEscape(distro)+"/"+url.PathEscape(release))
+			return tunaSubDirs(ctx, TUNAIncusBase+"/"+distro+"/"+release)
 		}
 		if variant == "" {
-			return tunaSubDirs(ctx, TUNAIncusBase+"/"+url.PathEscape(distro)+"/"+url.PathEscape(release)+"/"+url.PathEscape(arch))
+			return tunaSubDirs(ctx, TUNAIncusBase+"/"+distro+"/"+release+"/"+arch)
 		}
-		base := fmt.Sprintf("%s/%s/%s/%s/%s", TUNAIncusBase, url.PathEscape(distro), url.PathEscape(release), url.PathEscape(arch), url.PathEscape(variant))
+		base := fmt.Sprintf("%s/%s/%s/%s/%s", TUNAIncusBase, distro, release, arch, variant)
 		builds, err := tunaListDirs(ctx, base)
 		if err != nil {
 			return nil, BadRequest("读取镜像源失败: %s", err.Error())
@@ -127,8 +127,10 @@ func (s *VirtualisService) ImagePresets(ctx context.Context, driver, distro, rel
 		if len(builds) == 0 {
 			return nil, BadRequest("该组合下没有可用构建")
 		}
+		// 目录名取自页面 href，已是 URL 编码形态（%3A），直接拼接，
+		// 不能再 escape（会变成 %253A 导致 404）。
 		latest := builds[len(builds)-1] // 目录名字典序=时间序，取最新
-		buildURL := base + "/" + url.PathEscape(latest)
+		buildURL := base + "/" + latest
 		nameBase := fmt.Sprintf("%s-%s-%s-%s", distro, release, variant, arch)
 		meta := buildURL + "/meta.tar.xz"
 		return map[string]any{
