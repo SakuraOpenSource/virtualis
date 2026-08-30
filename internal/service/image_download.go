@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,19 @@ import (
 // 用 ExtraURL 同时抓取第二个文件。
 
 const imageDownloadTimeout = 12 * time.Hour
+
+// imageDownloadClient 强制 HTTP/1.1 并带浏览器式 UA：部分镜像站的前置
+// WAF（如 TUNA）会拦下 Go 默认的 h2 请求指纹，返回 403。
+var imageDownloadClient = &http.Client{
+	Timeout:   imageDownloadTimeout,
+	Transport: &http.Transport{ForceAttemptHTTP2: false, Proxy: http.ProxyFromEnvironment},
+}
+
+func init() {
+	if t, ok := imageDownloadClient.Transport.(*http.Transport); ok {
+		t.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+	}
+}
 
 // DownloadImageRequest 是发起一次镜像下载的参数。
 type DownloadImageRequest struct {
@@ -132,7 +146,9 @@ func (s *VirtualisService) ImagePresets(ctx context.Context, driver, distro, rel
 		latest := builds[len(builds)-1] // 目录名字典序=时间序，取最新
 		buildURL := base + "/" + latest
 		nameBase := fmt.Sprintf("%s-%s-%s-%s", distro, release, variant, arch)
-		meta := buildURL + "/meta.tar.xz"
+		// incus.tar.xz 是 Incus/LXD 格式的 metadata（含 metadata.yaml）；
+		// meta.tar.xz 是老 LXC 格式（config 等），Incus 导入会拒绝。
+		meta := buildURL + "/incus.tar.xz"
 		return map[string]any{
 			"build": latest,
 			"items": []imagePreset{
@@ -140,7 +156,7 @@ func (s *VirtualisService) ImagePresets(ctx context.Context, driver, distro, rel
 					Name: nameBase + "-container", DisplayName: nameBase + "（容器）",
 					URL: buildURL + "/rootfs.tar.xz", ExtraURL: meta,
 					OSType: distro, OSVersion: release, Arch: arch,
-					Note: "meta.tar.xz + rootfs.tar.xz",
+					Note: "incus.tar.xz + rootfs.tar.xz",
 				},
 				{
 					Name: nameBase + "-vm", DisplayName: nameBase + "（虚拟机）",
@@ -176,6 +192,7 @@ func tunaListDirs(ctx context.Context, base string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "virtualis/1.0")
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
 		return nil, err
@@ -290,7 +307,8 @@ func (s *VirtualisService) downloadTo(ctx context.Context, rawURL string) (strin
 	if err != nil {
 		return "", 0, "", "", err
 	}
-	resp, err := (&http.Client{Timeout: imageDownloadTimeout}).Do(req)
+	req.Header.Set("User-Agent", "virtualis/1.0")
+	resp, err := imageDownloadClient.Do(req)
 	if err != nil {
 		return "", 0, "", "", err
 	}
