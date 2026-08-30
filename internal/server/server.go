@@ -86,6 +86,8 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	adminImages := authed.Group("/images", middleware.RequireAdmin())
 	adminImages.POST("", h.CreateImage)
 	adminImages.POST("/upload", h.UploadImage)
+	adminImages.POST("/download", h.StartImageDownload)
+	adminImages.GET("/presets", h.ImagePresets)
 	adminImages.GET("/:id/download", h.DownloadImage)
 	adminImages.DELETE("/:id", h.DeleteImage)
 

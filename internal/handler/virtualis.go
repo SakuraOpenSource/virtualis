@@ -371,6 +371,23 @@ func (h *Handler) Image(c *gin.Context) {
 }
 
 // CreateImage creates a new image record.
+// StartImageDownload 从 URL（或预设源）后台下载镜像。
+func (h *Handler) StartImageDownload(c *gin.Context) {
+	var req service.DownloadImageRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	item, err := h.virtualis().DownloadImage(req)
+	respond(c, item, err)
+}
+
+// ImagePresets 返回预设镜像源（QEMU 魔方云 / Incus 清华源目录浏览）。
+func (h *Handler) ImagePresets(c *gin.Context) {
+	items, err := h.virtualis().ImagePresets(c.Request.Context(),
+		c.Query("driver"), c.Query("distro"), c.Query("release"), c.Query("arch"), c.Query("variant"))
+	respond(c, items, err)
+}
+
 func (h *Handler) CreateImage(c *gin.Context) {
 	var req service.CreateImageRequest
 	if !bindJSON(c, &req) {

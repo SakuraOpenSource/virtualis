@@ -292,7 +292,17 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	wireInstance := toWireInstance(instance, image)
 	// 面板生成的初始 root 密码只随创建请求下发一次。
 	wireInstance.RootPassword = instance.LoadSSHPassword()
-	remote, remoteErr := client.CreateInstance(ctx, wireInstance, toWireImage(image), reader, filename)
+	var extraReader io.ReadCloser
+	var extraName string
+	if extraReader, extraName, err = s.openExtraImage(image); err != nil {
+		_ = s.db.Model(instance).Update("status", model.InstanceStatusError).Error
+		instance.Status = model.InstanceStatusError
+		return instance, err
+	}
+	if extraReader != nil {
+		defer extraReader.Close()
+	}
+	remote, remoteErr := client.CreateInstance(ctx, wireInstance, toWireImage(image), reader, filename, extraReader, extraName)
 	if remoteErr != nil {
 		_ = s.db.Model(instance).Update("status", model.InstanceStatusError).Error
 		instance.Status = model.InstanceStatusError
@@ -415,6 +425,8 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	}
 	var reader io.ReadCloser
 	var filename string
+	var extraReader io.ReadCloser
+	var extraName string
 	if action == model.ActionReinstall {
 		reader, filename, err = s.openImage(instance.Image)
 		if err != nil {
@@ -423,8 +435,15 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 		if reader != nil {
 			defer reader.Close()
 		}
+		extraReader, extraName, err = s.openExtraImage(instance.Image)
+		if err != nil {
+			return nil, err
+		}
+		if extraReader != nil {
+			defer extraReader.Close()
+		}
 	}
-	remote, err := client.PowerInstance(ctx, toWireInstance(instance, instance.Image), action, toWireImage(instance.Image), reader, filename)
+	remote, err := client.PowerInstance(ctx, toWireInstance(instance, instance.Image), action, toWireImage(instance.Image), reader, filename, extraReader, extraName)
 	if err != nil {
 		_ = s.db.Model(instance).Update("status", model.InstanceStatusError).Error
 		return nil, agentFailure(err)
@@ -757,6 +776,18 @@ func (s *VirtualisService) openImage(image *model.Image) (io.ReadCloser, string,
 	return f, name, nil
 }
 
+// openExtraImage 打开 Incus 分割镜像的 meta 文件（无则返回 nil）。
+func (s *VirtualisService) openExtraImage(image *model.Image) (io.ReadCloser, string, error) {
+	if image == nil || image.ExtraPath == "" || s.storage == nil {
+		return nil, "", nil
+	}
+	f, err := s.storage.Open(image.ExtraPath)
+	if err != nil {
+		return nil, "", BadRequest("镜像 meta 文件不可读取: %s", err.Error())
+	}
+	return f, "meta.tar.xz", nil
+}
+
 func toWireImage(image *model.Image) *agentclient.Image {
 	if image == nil {
 		return nil
@@ -770,6 +801,7 @@ func toWireImage(image *model.Image) *agentclient.Image {
 		OriginalName: image.OriginalName,
 		SizeBytes:    image.SizeBytes,
 		Checksum:     image.Checksum,
+		ExtraPath:    image.ExtraPath,
 	}
 }
 

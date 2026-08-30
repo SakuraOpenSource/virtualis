@@ -230,10 +230,12 @@ type Image struct {
 	OriginalName string `gorm:"size:255" json:"original_name"`
 	MimeType     string `gorm:"size:128" json:"mime_type"`
 	FilePath     string `gorm:"size:255" json:"file_path"`
-	SizeBytes    int64  `gorm:"not null;default:0" json:"size_bytes"`
-	Checksum     string `gorm:"size:128" json:"checksum"`
-	Status       string `gorm:"size:16;not null;default:available" json:"status"`
-	IsPublic     bool   `gorm:"not null;default:true" json:"is_public"`
+	// ExtraPath 是 Incus 分割镜像的第二文件（meta.tar.xz）的存储路径。
+	ExtraPath string `gorm:"size:255" json:"extra_path"`
+	SizeBytes int64  `gorm:"not null;default:0" json:"size_bytes"`
+	Checksum  string `gorm:"size:128" json:"checksum"`
+	Status    string `gorm:"size:16;not null;default:available" json:"status"`
+	IsPublic  bool   `gorm:"not null;default:true" json:"is_public"`
 }
 
 const (

@@ -56,6 +56,7 @@ type Image struct {
 	SizeBytes    int64  `json:"size_bytes,omitempty"`
 	Checksum     string `json:"checksum,omitempty"`
 	Path         string `json:"path,omitempty"`
+	ExtraPath    string `json:"extra_path,omitempty"`
 }
 
 // Driver is an agent-side capability report.
@@ -252,7 +253,7 @@ func (c *Client) SetRootPassword(ctx context.Context, instance Instance, passwor
 	return c.do(req, nil)
 }
 
-func (c *Client) CreateInstance(ctx context.Context, instance Instance, image *Image, imageFile io.Reader, filename string) (Instance, error) {
+func (c *Client) CreateInstance(ctx context.Context, instance Instance, image *Image, imageFile io.Reader, filename string, extraFile io.Reader, extraName string) (Instance, error) {
 	instance.Image = image
 	var out struct {
 		Instance Instance `json:"instance"`
@@ -274,7 +275,7 @@ func (c *Client) CreateInstance(ctx context.Context, instance Instance, image *I
 		return out.Instance, nil
 	}
 
-	body, contentType, err := multipartBody("instance", instance, "image", imageFile, filename)
+	body, contentType, err := multipartBodyExtra("instance", instance, "image", imageFile, filename, extraFile, extraName)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -302,7 +303,7 @@ func (c *Client) DeleteInstance(ctx context.Context, instance Instance) error {
 	return c.do(req, nil)
 }
 
-func (c *Client) PowerInstance(ctx context.Context, instance Instance, action string, image *Image, imageFile io.Reader, filename string) (Instance, error) {
+func (c *Client) PowerInstance(ctx context.Context, instance Instance, action string, image *Image, imageFile io.Reader, filename string, extraFile io.Reader, extraName string) (Instance, error) {
 	instance.Image = image
 	var out struct {
 		Instance Instance `json:"instance"`
@@ -324,10 +325,10 @@ func (c *Client) PowerInstance(ctx context.Context, instance Instance, action st
 		}
 		return out.Instance, nil
 	}
-	body, contentType, err := multipartBody("power", struct {
+	body, contentType, err := multipartBodyExtra("power", struct {
 		Action   string   `json:"action"`
 		Instance Instance `json:"instance"`
-	}{Action: action, Instance: instance}, "image", imageFile, filename)
+	}{Action: action, Instance: instance}, "image", imageFile, filename, extraFile, extraName)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -422,6 +423,12 @@ func (c *Client) VNC(ctx context.Context, instance Instance) (VNCInfo, error) {
 }
 
 func multipartBody(field string, value any, fileField string, file io.Reader, filename string) (io.Reader, string, error) {
+	return multipartBodyExtra(field, value, fileField, file, filename, nil, "")
+}
+
+// multipartBodyExtra 在 multipart 里追加可选的 extra 文件
+// （Incus 分割镜像的 meta.tar.xz）。
+func multipartBodyExtra(field string, value any, fileField string, file io.Reader, filename string, extraFile io.Reader, extraName string) (io.Reader, string, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return nil, "", err
@@ -446,6 +453,17 @@ func multipartBody(field string, value any, fileField string, file io.Reader, fi
 		if _, err := io.Copy(part, file); err != nil {
 			_ = writer.CloseWithError(err)
 			return
+		}
+		if extraFile != nil {
+			part, err := w.CreateFormFile("extra", extraName)
+			if err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
+			if _, err := io.Copy(part, extraFile); err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
 		}
 		if err := w.Close(); err != nil {
 			_ = writer.CloseWithError(err)
