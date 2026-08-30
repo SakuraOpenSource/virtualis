@@ -52,6 +52,12 @@ func Load(dataDir string) (*Config, error) {
 	if c.Listen == "" {
 		c.Listen = DefaultListen
 	}
+	// 历史安装的 sqlite 路径是相对路径：相对进程工作目录解析会随启动方式
+	// 漂移（systemd 与手动运行各产生一个分叉库）。统一锚定到 -data 目录；
+	// 老配置请把 path 改成锚定后的值（如 "virtualis.db"）。
+	if c.Database.Driver == DriverSQLite && c.Database.Path != "" && !filepath.IsAbs(c.Database.Path) {
+		c.Database.Path = filepath.Join(dataDir, c.Database.Path)
+	}
 	return &c, nil
 }
 
