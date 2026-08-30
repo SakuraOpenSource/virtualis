@@ -112,6 +112,17 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	agentAPI.GET("/binary", h.AgentBinary)
 	agentAPI.HEAD("/binary", h.AgentBinary)
 
+	// Machine-to-machine open API: site API key auth instead of session
+	// cookies, so it also lives outside the CSRF group.
+	v1 := eng.Group("/api/v1", middleware.RequireInstalled(rt), middleware.RequireAPIKey(rt))
+	v1.GET("/images", h.V1Images)
+	v1.POST("/instances", h.V1CreateInstance)
+	v1.GET("/instances", h.Instances)
+	v1.GET("/instances/:id", h.Instance)
+	v1.GET("/instances/:id/status", h.InstanceStatus)
+	v1.DELETE("/instances/:id", h.DeleteInstance)
+	v1.POST("/instances/:id/power", h.InstancePower)
+
 	// SPA fallback + API 404
 	frontend := gin.WrapF(web.Handler())
 	eng.NoRoute(func(c *gin.Context) {
