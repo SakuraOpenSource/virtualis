@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -198,6 +199,11 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if err != nil {
 		return nil, BadRequest("%s", err.Error())
 	}
+	// 默认网卡只作用于 dedicated 模式；NAT 必须继续使用 incusbr0/
+	// virbr0，none 模式不应注入任何挂载目标。显式 bridge 始终优先。
+	if strings.EqualFold(strings.TrimSpace(req.Network.Mode), model.NetworkModeDedicated) && strings.TrimSpace(req.Network.Bridge) == "" {
+		req.Network.Bridge = def.DefaultNIC
+	}
 	network, err := model.NormalizeNetworkConfig(req.Network)
 	if err != nil {
 		return nil, BadRequest("%s", err.Error())
@@ -261,6 +267,8 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if err := s.db.Create(instance).Error; err != nil {
 		return nil, err
 	}
+	operationID := newOperationID()
+	appendOperationLog(s.db, instance.ID, operationID, model.OperationCreate, "database", model.OperationSuccess, "实例记录已创建", nil)
 	// 自动 SSH 映射：NAT 模式且有密码时建一条 TCP 22 转发，不计入上限。
 	if autoPassword && network.Mode == model.NetworkModeNAT {
 		hostPort, portErr := s.allocateNATPort(*req.AgentID)
@@ -320,10 +328,12 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 		return nil, mErr
 	}
 	if err := s.db.Model(instance).Updates(map[string]any{
-		"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON),
+		"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network),
 	}).Error; err != nil {
 		return nil, err
 	}
+	appendOperationLog(s.db, instance.ID, operationID, model.OperationCreate, "agent", model.OperationSuccess,
+		fmt.Sprintf("实例创建完成，状态 %s，配置 IPv4 %s", instance.Status, primaryConfiguredIP(instance.Network)), nil)
 	return s.GetInstance(instance.ID)
 }
 
@@ -402,10 +412,13 @@ func (s *VirtualisService) DeleteInstance(ctx context.Context, id uint) error {
 			return agentFailure(err)
 		}
 	}
+	appendOperationLog(s.db, id, newOperationID(), model.OperationDelete, "complete", model.OperationSuccess, "实例已删除", nil)
 	return s.db.Delete(&model.Instance{}, id).Error
 }
 
 func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action string) (*model.Instance, error) {
+	operationID := newOperationID()
+	appendOperationLog(s.db, id, operationID, model.OperationPower, "start", model.OperationRunning, "开始执行 "+action, nil)
 	if !model.ValidAction(action) {
 		return nil, BadRequest("invalid action %q", action)
 	}
@@ -455,9 +468,10 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	if mErr != nil {
 		return nil, mErr
 	}
-	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON)}).Error; err != nil {
+	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network)}).Error; err != nil {
 		return nil, err
 	}
+	appendOperationLog(s.db, id, operationID, model.OperationPower, "complete", model.OperationSuccess, action+" 执行完成", nil)
 	return s.GetInstance(instance.ID)
 }
 
@@ -486,7 +500,7 @@ func (s *VirtualisService) RefreshStatus(ctx context.Context, id uint) (*model.I
 	if mErr != nil {
 		return nil, mErr
 	}
-	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON)}).Error; err != nil {
+	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network)}).Error; err != nil {
 		return nil, err
 	}
 	return s.GetInstance(id)
@@ -523,11 +537,16 @@ func (s *VirtualisService) InstanceNetwork(ctx context.Context, id uint) (agentc
 	if err != nil {
 		return agentclient.NetworkStatus{}, err
 	}
-	network, err := client.Network(ctx, toWireInstance(instance, instance.Image))
-	if err != nil {
+	if network, err := client.Network(ctx, toWireInstance(instance, instance.Image)); err == nil {
+		if ip := firstAgentNetworkIPv4(network); ip != "" {
+			instance.ObservedIP = ip
+			instance.IP = ip
+			_ = s.db.Model(instance).Updates(map[string]any{"ip": ip, "observed_ip": ip, "network_error": ""}).Error
+		}
+		return network, nil
+	} else {
 		return agentclient.NetworkStatus{}, agentFailure(err)
 	}
-	return network, nil
 }
 
 func (s *VirtualisService) InstanceVNC(ctx context.Context, id uint) (agentclient.VNCInfo, error) {
@@ -849,6 +868,118 @@ func mergeRemoteNetwork(instance *model.Instance, remote agentclient.Instance) {
 	if remote.Network.MAC != "" {
 		instance.Network.MAC = remote.Network.MAC
 	}
+}
+
+func firstAgentNetworkIPv4(network agentclient.NetworkStatus) string {
+	for _, iface := range network.Interfaces {
+		if iface.Name == "lo" {
+			continue
+		}
+		for _, addr := range iface.IPv4 {
+			ip := strings.Split(addr, "/")[0]
+			if net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+// primaryConfiguredIP returns Network.IPv4 without CIDR for compatibility with
+// the legacy top-level Instance.IP field.
+func primaryConfiguredIP(network model.NetworkConfig) string {
+	return strings.Split(strings.TrimSpace(network.IPv4), "/")[0]
+}
+
+// ConfigureInstanceNetwork validates/persists the desired network and asks the
+// agent to synchronously re-run IPv4, SSH and NAT reconciliation.
+func (s *VirtualisService) ConfigureInstanceNetwork(ctx context.Context, id uint, desired model.NetworkConfig) (*model.Instance, string, error) {
+	operationID := newOperationID()
+	appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "start", model.OperationRunning, "开始配置实例网络", nil)
+	instance, err := s.GetInstance(id)
+	if err != nil {
+		appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "load", model.OperationFailed, "读取实例失败", err)
+		return nil, operationID, err
+	}
+	if instance.Agent == nil {
+		err = Conflict("实例没有关联被控节点")
+		appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "validate", model.OperationFailed, "实例未关联被控节点", err)
+		return nil, operationID, err
+	}
+	if strings.TrimSpace(desired.Mode) == "" {
+		desired = instance.Network
+	}
+	desired, err = model.NormalizeNetworkConfig(desired)
+	if err != nil {
+		err = BadRequest("%s", err.Error())
+		appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "validate", model.OperationFailed, "网络参数校验失败", err)
+		return nil, operationID, err
+	}
+	if desired.Mode == model.NetworkModeDedicated {
+		client, clientErr := s.agentClient(instance.Agent)
+		if clientErr != nil {
+			return nil, operationID, clientErr
+		}
+		summary, hostErr := client.HostNetwork(ctx)
+		if hostErr != nil {
+			err = agentFailure(hostErr)
+			appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "validate", model.OperationFailed, "读取被控网卡失败", err)
+			return nil, operationID, err
+		}
+		if summary.IPv4Count < 2 {
+			err = BadRequest("独立 IP 模式要求被控主机拥有至少 2 个 IPv4 地址")
+			appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "validate", model.OperationFailed, "独立 IP 条件不足", err)
+			return nil, operationID, err
+		}
+		if desired.IPv4 != "" {
+			taken, takenErr := s.dedicatedIPTaken(instance.Agent.ID, desired.IPv4, id)
+			if takenErr != nil {
+				return nil, operationID, takenErr
+			}
+			if taken {
+				err = Conflict("独立 IP %s 已被其它实例占用", desired.IPv4)
+				appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "validate", model.OperationFailed, "独立 IP 冲突", err)
+				return nil, operationID, err
+			}
+		}
+	}
+	instance.Network = desired
+	client, err := s.agentClient(instance.Agent)
+	if err != nil {
+		appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "connect", model.OperationFailed, "连接被控失败", err)
+		return nil, operationID, err
+	}
+	appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "agent", model.OperationRunning, "被控开始配置 IPv4、SSH 和 NAT", nil)
+	remote, observedIP, err := client.ConfigureNetwork(ctx, toWireInstance(instance, instance.Image), desired, instance.LoadSSHPassword())
+	if err != nil {
+		wrapped := agentFailure(err)
+		_ = s.db.Model(instance).Updates(map[string]any{"network_error": err.Error(), "ssh_ready": false}).Error
+		appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "agent", model.OperationFailed, "被控配置网络失败", err)
+		return nil, operationID, wrapped
+	}
+	applyWireInstance(instance, remote)
+	mergeRemoteNetwork(instance, remote)
+	if observedIP != "" {
+		instance.ObservedIP = observedIP
+		instance.IP = observedIP
+	}
+	instance.SSHReady = true
+	instance.NetworkError = ""
+	networkJSON, err := json.Marshal(instance.Network)
+	if err != nil {
+		return nil, operationID, err
+	}
+	updates := map[string]any{
+		"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON),
+		"ip": instance.IP, "observed_ip": instance.ObservedIP, "ssh_ready": true, "network_error": "",
+	}
+	if err := s.db.Model(instance).Updates(updates).Error; err != nil {
+		appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "persist", model.OperationFailed, "保存网络状态失败", err)
+		return nil, operationID, err
+	}
+	appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "complete", model.OperationSuccess, fmt.Sprintf("网络配置完成，IPv4 %s", instance.IP), nil)
+	result, err := s.GetInstance(id)
+	return result, operationID, err
 }
 
 // GeneratePassword 生成 n 位字母数字随机密码（去掉了易混字符）。

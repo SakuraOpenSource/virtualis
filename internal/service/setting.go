@@ -23,6 +23,7 @@ const (
 	KeyVirtDefaultMemory  = "virtualis_default_memory"
 	KeyVirtDefaultDisk    = "virtualis_default_disk"
 	KeyVirtDefaultArch    = "virtualis_default_arch"
+	KeyVirtDefaultNIC     = "virtualis_default_nic"
 	KeyVirtAllowReinstall = "virtualis_allow_reinstall"
 	KeyVirtAutoRefresh    = "virtualis_auto_refresh"
 )
@@ -41,11 +42,14 @@ type CaptchaConfig struct {
 
 // VirtualisSettings holds virtualization defaults.
 type VirtualisSettings struct {
-	DefaultDriver  string `json:"default_driver"`
-	DefaultCPU     int    `json:"default_cpu"`
-	DefaultMemory  int    `json:"default_memory"`
-	DefaultDisk    int    `json:"default_disk"`
-	DefaultArch    string `json:"default_arch"`
+	DefaultDriver string `json:"default_driver"`
+	DefaultCPU    int    `json:"default_cpu"`
+	DefaultMemory int    `json:"default_memory"`
+	DefaultDisk   int    `json:"default_disk"`
+	DefaultArch   string `json:"default_arch"`
+	// DefaultNIC is used only for dedicated mode when an instance does not
+	// explicitly choose a bridge/interface. Empty means agent auto-detection.
+	DefaultNIC     string `json:"default_network_interface"`
 	AllowReinstall bool   `json:"allow_reinstall"`
 	AutoRefresh    bool   `json:"auto_refresh"`
 }
@@ -145,7 +149,7 @@ func (s *SettingService) Virtualis() VirtualisSettings {
 	var rows []model.Setting
 	keys := []string{
 		KeyVirtDefaultDriver, KeyVirtDefaultCPU, KeyVirtDefaultMemory,
-		KeyVirtDefaultDisk, KeyVirtDefaultArch, KeyVirtAllowReinstall, KeyVirtAutoRefresh,
+		KeyVirtDefaultDisk, KeyVirtDefaultArch, KeyVirtDefaultNIC, KeyVirtAllowReinstall, KeyVirtAutoRefresh,
 	}
 	_ = s.db.Where(map[string]any{"key": keys}).Find(&rows).Error
 	for _, r := range rows {
@@ -170,6 +174,8 @@ func (s *SettingService) Virtualis() VirtualisSettings {
 			if r.Value != "" {
 				def.DefaultArch = r.Value
 			}
+		case KeyVirtDefaultNIC:
+			def.DefaultNIC = strings.TrimSpace(r.Value)
 		case KeyVirtAllowReinstall:
 			def.AllowReinstall = r.Value == "1"
 		case KeyVirtAutoRefresh:
@@ -205,6 +211,12 @@ func (s *SettingService) SaveVirtualis(in VirtualisSettings) (VirtualisSettings,
 	if in.DefaultArch == "" {
 		in.DefaultArch = "x86_64"
 	}
+	in.DefaultNIC = strings.TrimSpace(in.DefaultNIC)
+	if len(in.DefaultNIC) > 64 || strings.IndexFunc(in.DefaultNIC, func(r rune) bool {
+		return !(r == '-' || r == '_' || r == '.' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))
+	}) >= 0 {
+		return VirtualisSettings{}, BadRequest("默认网卡名称格式无效")
+	}
 	if in.DefaultCPU < 1 || in.DefaultCPU > 64 {
 		return VirtualisSettings{}, BadRequest("cpu must be 1-64")
 	}
@@ -226,6 +238,7 @@ func (s *SettingService) SaveVirtualis(in VirtualisSettings) (VirtualisSettings,
 		{Key: KeyVirtDefaultMemory, Value: strconv.Itoa(in.DefaultMemory)},
 		{Key: KeyVirtDefaultDisk, Value: strconv.Itoa(in.DefaultDisk)},
 		{Key: KeyVirtDefaultArch, Value: in.DefaultArch},
+		{Key: KeyVirtDefaultNIC, Value: in.DefaultNIC},
 		{Key: KeyVirtAllowReinstall, Value: boolVal(in.AllowReinstall)},
 		{Key: KeyVirtAutoRefresh, Value: boolVal(in.AutoRefresh)},
 	}

@@ -210,6 +210,36 @@ func (c *Client) Drivers(ctx context.Context) ([]Driver, error) {
 	return out.Items, nil
 }
 
+// ConfigureNetwork synchronously asks the agent to re-run guest network/SSH/NAT setup.
+// It is intentionally separate from Network, which is read-only telemetry.
+func (c *Client) ConfigureNetwork(ctx context.Context, instance Instance, network model.NetworkConfig, password string) (Instance, string, error) {
+	payload := struct {
+		Instance Instance            `json:"instance"`
+		Network  model.NetworkConfig `json:"network"`
+		Password string              `json:"password,omitempty"`
+	}{Instance: instance, Network: network, Password: password}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return Instance{}, "", err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("instances/%d/network/configure", instance.ID), bytes.NewReader(raw), "application/json")
+	if err != nil {
+		return Instance{}, "", err
+	}
+	var out struct {
+		Instance Instance `json:"instance"`
+		Status   string   `json:"status"`
+		IP       string   `json:"ip"`
+	}
+	if err := c.do(req, &out); err != nil {
+		return Instance{}, "", err
+	}
+	if out.Instance.ID == 0 {
+		out.Instance = instance
+	}
+	return out.Instance, out.IP, nil
+}
+
 // HostNetwork 拉取被控主机的网卡与地址清单。
 func (c *Client) HostNetwork(ctx context.Context) (*HostNetworkSummary, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, "host/network", nil, "")

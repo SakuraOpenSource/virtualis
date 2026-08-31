@@ -155,7 +155,11 @@ type Instance struct {
 	Spec        InstanceSpec  `gorm:"type:text;serializer:json" json:"spec"`
 	Network     NetworkConfig `gorm:"type:text;serializer:json" json:"network"`
 	IP          string        `gorm:"size:64" json:"ip"`
-	ConfigJSON  string        `gorm:"type:text" json:"-"`
+	// ObservedIP 是被控从运行时网卡读取到的 IPv4；Network.IPv4 是期望配置。
+	ObservedIP   string `gorm:"size:64" json:"observed_ip"`
+	SSHReady     bool   `gorm:"not null;default:false" json:"ssh_ready"`
+	NetworkError string `gorm:"type:text" json:"network_error,omitempty"`
+	ConfigJSON   string `gorm:"type:text" json:"-"`
 	// MaxNATMappings 是该实例允许创建的 NAT 映射上限，0 表示不限。
 	MaxNATMappings int    `gorm:"not null;default:0" json:"max_nat_mappings"`
 	OwnerID        *uint  `gorm:"index" json:"owner_id"`

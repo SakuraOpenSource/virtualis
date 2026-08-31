@@ -210,6 +210,37 @@ func (h *Handler) InstanceNetwork(c *gin.Context) {
 	respond(c, gin.H{"network": network}, err)
 }
 
+// InstanceConfigureNetwork re-runs guest IPv4, SSH and NAT configuration.
+func (h *Handler) InstanceConfigureNetwork(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Network model.NetworkConfig `json:"network"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+	instance, operationID, err := h.virtualis().ConfigureInstanceNetwork(c.Request.Context(), id, req.Network)
+	respond(c, gin.H{"instance": instance, "operation_id": operationID}, err)
+}
+
+// InstanceOperationLogs returns persisted lifecycle/network operation history.
+func (h *Handler) InstanceOperationLogs(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	page, pageSize, offset := Pagination(c)
+	items, total, err := h.virtualis().InstanceOperationLogs(id, offset, pageSize)
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	OK(c, Page{Items: items, Total: total, Page: page, PageSize: pageSize})
+}
+
 func (h *Handler) InstanceVNC(c *gin.Context) {
 	id, ok := IDParam(c, "id")
 	if !ok {
