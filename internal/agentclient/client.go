@@ -41,6 +41,8 @@ type Instance struct {
 	NATMappings []NATMapping `json:"nat_mappings,omitempty"`
 	// RootPassword 只随创建请求下发一次（写盘/初始 chpasswd 用）。
 	RootPassword string `json:"root_password,omitempty"`
+	// SSHReady 是被控回包字段：首次密码注入完成后为 true。
+	SSHReady bool `json:"ssh_ready,omitempty"`
 }
 
 // Image contains the metadata an agent needs to attach an image locally.

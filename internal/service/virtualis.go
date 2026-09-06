@@ -334,7 +334,52 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	}
 	appendOperationLog(s.db, instance.ID, operationID, model.OperationCreate, "agent", model.OperationSuccess,
 		fmt.Sprintf("实例创建完成，状态 %s，配置 IPv4 %s", instance.Status, primaryConfiguredIP(instance.Network)), nil)
+	// 首次密码注入在被控后台执行：挂一个短轮询，注入完成后把 ssh_ready
+	// 回写为 true，让面板与下游（Levis 等）不必依赖手动“配置网络”。
+	if wireInstance.RootPassword != "" {
+		go s.watchSSHReady(instance.ID, instance.Agent)
+	}
 	return s.GetInstance(instance.ID)
+}
+
+// watchSSHReady 轮询被控状态，直至首次密码注入完成（SSHReady=true）或超时。
+// 失败保持安静：ssh_ready 维持 false，用户可用“配置网络”显式重试。
+func (s *VirtualisService) watchSSHReady(instanceID uint, agent *model.Agent) {
+	if agent == nil {
+		return
+	}
+	client, err := s.agentClient(agent)
+	if err != nil {
+		return
+	}
+	// 6 分钟耐心：精简镜像要现装 openssh-server（apt update + install），
+	// 注入通常 2-4 分钟，慢源更久。轮询本身就是 agent 的 /status，顺带
+	// 帮 NAT 对账；实例被删时 GetInstance 报错即退出。
+	for attempt := 0; attempt < 60; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(6 * time.Second):
+			}
+		}
+		instance, err := s.GetInstance(instanceID)
+		if err != nil {
+			return // 实例已被删除
+		}
+		if instance.SSHReady {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		remote, err := client.Status(ctx, toWireInstance(instance, instance.Image))
+		cancel()
+		if err != nil {
+			continue
+		}
+		if remote.SSHReady {
+			updates := map[string]any{"ssh_ready": true}
+			_ = s.db.Model(&model.Instance{}).Where("id = ?", instanceID).Updates(updates).Error
+			return
+		}
+	}
 }
 
 // dedicatedIPTaken 报告同一被控上是否已有实例占用该独立 IP。
@@ -456,7 +501,13 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 			defer extraReader.Close()
 		}
 	}
-	remote, err := client.PowerInstance(ctx, toWireInstance(instance, instance.Image), action, toWireImage(instance.Image), reader, filename, extraReader, extraName)
+	wireInstance := toWireInstance(instance, instance.Image)
+	if action == model.ActionReinstall {
+		// 重装会得到一个全新 guest，与创建路径一致地携带初始 root 密码，
+		// 被控在重装完成后据此重做注入，保证重装出来的系统开箱即用。
+		wireInstance.RootPassword = instance.LoadSSHPassword()
+	}
+	remote, err := client.PowerInstance(ctx, wireInstance, action, toWireImage(instance.Image), reader, filename, extraReader, extraName)
 	if err != nil {
 		_ = s.db.Model(instance).Update("status", model.InstanceStatusError).Error
 		return nil, agentFailure(err)
@@ -468,8 +519,17 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	if mErr != nil {
 		return nil, mErr
 	}
-	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network)}).Error; err != nil {
+	updates := map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network)}
+	// 重装等于换了个全新 guest：旧的 SSH 就绪状态作废，等后台注入完成后
+	// 由 watchSSHReady 重新置 true。
+	if action == model.ActionReinstall {
+		updates["ssh_ready"] = false
+	}
+	if err := s.db.Model(instance).Updates(updates).Error; err != nil {
 		return nil, err
+	}
+	if action == model.ActionReinstall && instance.LoadSSHPassword() != "" {
+		go s.watchSSHReady(instance.ID, instance.Agent)
 	}
 	appendOperationLog(s.db, id, operationID, model.OperationPower, "complete", model.OperationSuccess, action+" 执行完成", nil)
 	return s.GetInstance(instance.ID)
@@ -500,7 +560,14 @@ func (s *VirtualisService) RefreshStatus(ctx context.Context, id uint) (*model.I
 	if mErr != nil {
 		return nil, mErr
 	}
-	if err := s.db.Model(instance).Updates(map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network)}).Error; err != nil {
+	updates := map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network)}
+	// 被控的首次密码注入是异步的：状态轮询顺带把 ssh_ready 回写为 true，
+	// 只允许 false→true，配置网络失败路径负责置回 false。
+	if remote.SSHReady && !instance.SSHReady {
+		instance.SSHReady = true
+		updates["ssh_ready"] = true
+	}
+	if err := s.db.Model(instance).Updates(updates).Error; err != nil {
 		return nil, err
 	}
 	return s.GetInstance(id)
