@@ -122,6 +122,9 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	v1.GET("/instances", h.Instances)
 	v1.GET("/instances/:id", h.Instance)
 	v1.GET("/instances/:id/status", h.InstanceStatus)
+	v1.GET("/instances/:id/metrics", h.InstanceMetrics)
+	v1.GET("/instances/:id/network", h.InstanceNetwork)
+	v1.GET("/instances/:id/access", h.V1InstanceAccess)
 	v1.DELETE("/instances/:id", h.DeleteInstance)
 	v1.POST("/instances/:id/power", h.InstancePower)
 

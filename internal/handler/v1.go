@@ -61,3 +61,46 @@ func (h *Handler) V1Images(c *gin.Context) {
 	}
 	OK(c, gin.H{"items": out})
 }
+
+// V1InstanceAccess 返回实例网络与 SSH 访问信息，供上游插件聚合。
+func (h *Handler) V1InstanceAccess(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	instance, err := h.virtualis().GetInstance(id)
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	if instance.Network.Mode == "" {
+		instance.Network.Mode = model.NetworkModeNAT
+	}
+	ip := instance.ObservedIP
+	if ip == "" {
+		ip = instance.IP
+	}
+	sshHost, sshPort := ip, 22
+	if instance.Network.Mode == model.NetworkModeNAT {
+		sshHost, sshPort = "", 0
+		for _, mapping := range instance.NATMappings {
+			if mapping.Protocol == "tcp" && mapping.GuestPort == 22 {
+				if instance.Agent != nil {
+					sshHost = instance.Agent.IP
+				}
+				sshPort = mapping.HostPort
+				break
+			}
+		}
+	}
+	OK(c, gin.H{
+		"network": gin.H{
+			"mode": instance.Network.Mode, "ipv4": ip, "mac": instance.Network.MAC,
+			"gateway": instance.Network.Gateway, "dns": instance.Network.DNS,
+		},
+		"ssh": gin.H{
+			"host": sshHost, "port": sshPort, "username": "root",
+			"password": instance.SSHPassword, "ready": instance.SSHReady,
+		},
+	})
+}
