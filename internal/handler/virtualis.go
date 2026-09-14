@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"github.com/SakuraOpenSource/virtualis/internal/httpx"
 	"github.com/SakuraOpenSource/virtualis/internal/model"
 	"github.com/SakuraOpenSource/virtualis/internal/service"
 )
@@ -257,8 +258,31 @@ func (h *Handler) InstanceVNC(c *gin.Context) {
 	respond(c, gin.H{"vnc": vnc}, err)
 }
 
-// vncUpgrader 与被控端保持一致：noVNC 走 binary 子协议；来源不校验，因为
-// 鉴权已由 cookie 中间件完成，且前后端分离部署时 Origin 是前端域名。
+// checkSessionWSOrigin 校验会话版 VNC 握手的来源，防止 Cookie 会话被跨站页面盗用。
+// 浏览器发起 ws 握手一定会带 Origin；两者都缺席视为非浏览器客户端，放行。
+// Origin 存在则必须与请求 Host 同源，否则拒绝；Origin 缺席时再看 Referer，同理。
+// 短票通道不走 Cookie，不做此校验，保持原样。
+func checkSessionWSOrigin(r *http.Request) bool {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host)
+	}
+	if referer := r.Header.Get("Referer"); referer != "" {
+		u, err := url.Parse(referer)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host)
+	}
+	return true
+}
+
+// vncUpgrader 与被控端保持一致：noVNC 走 binary 子协议。
+// 会话版入口在调用 relayVNC 前已用 checkSessionWSOrigin 显式校验并返回 403，
+// 此处保持放行以免短票通道（不走 Cookie）被误伤。
 var vncUpgrader = websocket.Upgrader{
 	ReadBufferSize:  32 << 10,
 	WriteBufferSize: 32 << 10,
@@ -275,11 +299,41 @@ func (h *Handler) InstanceVNCWebSocket(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !checkSessionWSOrigin(c.Request) {
+		Forbidden(c, "跨域 WebSocket 请求被拒绝")
+		return
+	}
 	instance, err := h.virtualis().GetInstance(id)
 	if err != nil {
 		respond(c, nil, err)
 		return
 	}
+	h.relayVNC(c, id, instance)
+}
+
+// InstanceVNCWebSocketByTicket 是给机器对接方用的 VNC 入口：
+// 浏览器带一次性短票（?ticket=）建连，不经过会话 Cookie。
+// 短票由 v1 的 vnc-ticket 接口签发，核销即失效，路径与会话版错开
+// 是为了避开 Gin 同 method+path 重复注册的 panic。
+func (h *Handler) InstanceVNCWebSocketByTicket(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	if !h.virtualis().ConsumeVNCTicket(c.Query("ticket"), id) {
+		httpx.Unauthorized(c, "vnc ticket 无效或已过期")
+		return
+	}
+	instance, err := h.virtualis().GetInstance(id)
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	h.relayVNC(c, id, instance)
+}
+
+// relayVNC 是两条 ws 入口共用的中继主体：鉴权（会话 / 短票）由调用方完成。
+func (h *Handler) relayVNC(c *gin.Context, id uint, instance *model.Instance) {
 	if instance.Agent == nil || instance.Agent.Endpoint == "" || instance.Agent.Token == "" {
 		Conflict(c, "被控节点没有可用的 VNC 连接")
 		return

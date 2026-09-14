@@ -80,6 +80,9 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	authed.POST("/instances/:id/password", h.InstancePasswordSet)
 	authed.GET("/instances/:id/vnc", h.InstanceVNC)
 	authed.GET("/instances/:id/vnc/ws", h.InstanceVNCWebSocket)
+	// 短票通道：浏览器带一次性 ticket 建连，不经过会话 Cookie。
+	// 路径与会话版错开，避免 Gin 同 method+path 重复注册 panic。
+	secured.GET("/instances/:id/vnc/ws-ticket", h.InstanceVNCWebSocketByTicket)
 
 	// Images: read requires auth, write requires admin
 	authed.GET("/images", h.Images)
@@ -127,6 +130,8 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	v1.GET("/instances/:id/access", h.V1InstanceAccess)
 	v1.DELETE("/instances/:id", h.DeleteInstance)
 	v1.POST("/instances/:id/power", h.InstancePower)
+	// VNC 短票签发：机器对接方凭站点 Key 领取，转交最终用户浏览器建连。
+	v1.POST("/instances/:id/vnc-ticket", h.V1CreateVNCTicket)
 
 	// SPA fallback + API 404
 	frontend := gin.WrapF(web.Handler())

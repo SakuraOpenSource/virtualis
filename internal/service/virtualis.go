@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -29,7 +31,20 @@ type VirtualisService struct {
 	db       *gorm.DB
 	settings *SettingService
 	storage  *storage.Store
+
+	// vncTickets 是一次性 VNC 短票：key 为随机凭证，value 绑定实例与过期时间。
+	// 只活在内存里，主控重启即失效，调用方（Levis 插件）须重新领取。
+	vncMu      sync.Mutex
+	vncTickets map[string]vncTicket
 }
+
+type vncTicket struct {
+	instanceID uint
+	expires    time.Time
+}
+
+// vncTicketTTL 是短票有效期：覆盖用户从点击到 noVNC 建连的耗时即可，越短越安全。
+const vncTicketTTL = 120 * time.Second
 
 // NewVirtualisService constructs the orchestration service. All driver
 // operations run on agents; the master only coordinates and persists.
@@ -640,6 +655,68 @@ func (s *VirtualisService) InstanceVNC(ctx context.Context, id uint) (agentclien
 	return vnc, nil
 }
 
+// CreateVNCTicket 为实例签发一张一次性 VNC 短票，供机器对机器调用方
+// （如 Levis 对接插件）转交给最终用户的浏览器建连。短票只活 120 秒，
+// 首次建连即核销，主控重启后全部失效。
+func (s *VirtualisService) CreateVNCTicket(ctx context.Context, id uint) (string, time.Time, error) {
+	instance, err := s.GetInstance(id)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if instance.Agent == nil {
+		return "", time.Time{}, Conflict("实例没有关联被控节点")
+	}
+	// 先确认被控侧 VNC 可用，不可用就不发短票，调用方直接展示原因。
+	client, err := s.agentClient(instance.Agent)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	vnc, err := client.VNC(ctx, toWireInstance(instance, instance.Image))
+	if err != nil {
+		return "", time.Time{}, agentFailure(err)
+	}
+	if !vnc.Available {
+		if vnc.Message == "" {
+			vnc.Message = "当前实例没有可用的 VNC"
+		}
+		return "", time.Time{}, Conflict("%s", vnc.Message)
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", time.Time{}, err
+	}
+	ticket := hex.EncodeToString(raw)
+	expires := time.Now().Add(vncTicketTTL)
+	s.vncMu.Lock()
+	if s.vncTickets == nil {
+		s.vncTickets = make(map[string]vncTicket)
+	}
+	// 顺手清理过期短票，map 不会无限增长。
+	for k, v := range s.vncTickets {
+		if time.Now().After(v.expires) {
+			delete(s.vncTickets, k)
+		}
+	}
+	s.vncTickets[ticket] = vncTicket{instanceID: id, expires: expires}
+	s.vncMu.Unlock()
+	return ticket, expires, nil
+}
+
+// ConsumeVNCTicket 核销短票：凭证匹配、未过期且绑定同一实例才放行，
+// 通过即删除（一次性），失败不透露具体原因。
+func (s *VirtualisService) ConsumeVNCTicket(ticket string, id uint) bool {
+	if ticket == "" || id == 0 {
+		return false
+	}
+	s.vncMu.Lock()
+	defer s.vncMu.Unlock()
+	v, ok := s.vncTickets[ticket]
+	if !ok || v.instanceID != id || time.Now().After(v.expires) {
+		return false
+	}
+	delete(s.vncTickets, ticket)
+	return true
+}
 func (s *VirtualisService) agentClient(agent *model.Agent) (*agentclient.Client, error) {
 	if agent == nil || strings.TrimSpace(agent.Endpoint) == "" {
 		return nil, Conflict("被控节点没有可访问的 endpoint")

@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/SakuraOpenSource/virtualis/internal/model"
@@ -110,4 +112,18 @@ func (h *Handler) V1InstanceAccess(c *gin.Context) {
 			"password": instance.SSHPassword, "ready": instance.SSHReady,
 		},
 	})
+}
+
+// V1CreateVNCTicket 为实例签发一次性 VNC 短票，供上游对接方转交最终用户。
+func (h *Handler) V1CreateVNCTicket(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	ticket, expires, err := h.virtualis().CreateVNCTicket(c.Request.Context(), id)
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	OK(c, gin.H{"ticket": ticket, "expires_at": expires.UTC().Format(time.RFC3339)})
 }
