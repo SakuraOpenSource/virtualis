@@ -177,15 +177,15 @@ jobs:
                 echo
               fi
             }
-            emit breaking.txt "⚠️ 不兼容变更"
-            emit feat.txt "✨ 新特性"
-            emit fix.txt "🐛 问题修复"
-            emit ci.txt "🔄 CI / 构建"
-            emit refactor.txt "♻️ 重构"
-            emit perf.txt "⚡ 性能优化"
-            emit docs.txt "📝 文档"
-            emit test.txt "✅ 测试"
-            emit other.txt "📦 其他变更"
+            emit breaking.txt "⚠️ Breaking Changes"
+            emit feat.txt "✨ Features"
+            emit fix.txt "🐛 Bug Fixes"
+            emit ci.txt "🔄 CI / Build"
+            emit refactor.txt "♻️ Refactor"
+            emit perf.txt "⚡ Performance"
+            emit docs.txt "📝 Docs"
+            emit test.txt "✅ Tests"
+            emit other.txt "📦 Other Changes"
 
             REPO_URL="$(git remote get-url origin 2>/dev/null | sed -E 's#(git@|https://)github.com[:/]##; s#\.git$##')"
             if [ -n "$REPO_URL" ] && [ -n "$PREV" ]; then

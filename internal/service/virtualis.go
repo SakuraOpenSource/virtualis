@@ -458,6 +458,11 @@ func (s *VirtualisService) DeleteInstance(ctx context.Context, id uint) error {
 		}
 	}
 	appendOperationLog(s.db, id, newOperationID(), model.OperationDelete, "complete", model.OperationSuccess, "实例已删除", nil)
+	// NAT 映射与实例同生死：不删会残留，SQLite 复用 ID 后会被后建实例继承，
+	// 对外展示的 SSH 端口就会指向已不存在的映射。
+	if err := s.db.Where("instance_id = ?", id).Delete(&model.NATMapping{}).Error; err != nil {
+		return err
+	}
 	return s.db.Delete(&model.Instance{}, id).Error
 }
 

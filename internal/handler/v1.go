@@ -73,6 +73,13 @@ func (h *Handler) V1InstanceAccess(c *gin.Context) {
 		respond(c, nil, err)
 		return
 	}
+	// 首次密码注入在被控是后台异步任务：查询访问信息时若尚未标记就绪，
+	// 主动对账一次被控状态，让 ready 在第一次查询就准确，而不是等轮询。
+	if !instance.SSHReady && instance.Status == model.InstanceStatusRunning && instance.Agent != nil {
+		if refreshed, rerr := h.virtualis().RefreshStatus(c.Request.Context(), id); rerr == nil {
+			instance = refreshed
+		}
+	}
 	if instance.Network.Mode == "" {
 		instance.Network.Mode = model.NetworkModeNAT
 	}
