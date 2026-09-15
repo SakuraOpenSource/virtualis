@@ -63,7 +63,10 @@ const (
 )
 
 type InstanceSpec struct {
-	CPU      int    `json:"cpu"`
+	CPU int `json:"cpu"`
+	// CPUMilli 是 CPU 毫核配额（500 表示 0.5 核），0 表示未设置（整核模式）。
+	// 设置时 CPU 字段由毫核向上取整得出，作为仅识别整核对端的兜底。
+	CPUMilli int    `json:"cpu_milli,omitempty"`
 	MemoryMB int    `json:"memory_mb"`
 	DiskGB   int    `json:"disk_gb"`
 	Arch     string `json:"arch,omitempty"`
@@ -342,11 +345,20 @@ func ValidInstanceStatus(s string) bool {
 }
 
 func NormalizeInstanceSpec(spec InstanceSpec) (InstanceSpec, error) {
-	if spec.CPU <= 0 {
-		spec.CPU = 1
-	}
-	if spec.CPU > 64 {
-		return spec, errors.New("CPU 核数需在 1-64 之间")
+	// CPUMilli 优先：毫核模式下 CPU 由毫核向上取整得出（仅识别整核的旧对端
+	// 兜底），此时整核的默认值与 64 核上限逻辑不再参与，上限由毫核保证。
+	if spec.CPUMilli > 0 {
+		if spec.CPUMilli < 100 || spec.CPUMilli > 64000 {
+			return spec, errors.New("CPU 毫核需在 100-64000 之间")
+		}
+		spec.CPU = (spec.CPUMilli + 999) / 1000
+	} else {
+		if spec.CPU <= 0 {
+			spec.CPU = 1
+		}
+		if spec.CPU > 64 {
+			return spec, errors.New("CPU 核数需在 1-64 之间")
+		}
 	}
 	if spec.MemoryMB <= 0 {
 		spec.MemoryMB = 1024

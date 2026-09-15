@@ -198,7 +198,9 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 
 	def := s.settings.Virtualis()
 	spec := req.Spec
-	if spec.CPU == 0 {
+	// 毫核模式下 CPU 由 NormalizeInstanceSpec 按毫核向上取整得出，这里
+	// 不再套用整核默认值，避免覆盖毫核换算结果。
+	if spec.CPU == 0 && spec.CPUMilli <= 0 {
 		spec.CPU = def.DefaultCPU
 	}
 	if spec.MemoryMB == 0 {
