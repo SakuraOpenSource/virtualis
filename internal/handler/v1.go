@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -126,4 +127,54 @@ func (h *Handler) V1CreateVNCTicket(c *gin.Context) {
 		return
 	}
 	OK(c, gin.H{"ticket": ticket, "expires_at": expires.UTC().Format(time.RFC3339)})
+}
+
+// V1ListNATMappings 返回实例的 NAT 端口映射清单，供机器对接方聚合展示。
+func (h *Handler) V1ListNATMappings(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	instance, err := h.virtualis().GetInstance(id)
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	items := instance.NATMappings
+	if items == nil {
+		items = []model.NATMapping{}
+	}
+	OK(c, gin.H{"items": items})
+}
+
+// V1CreateNATMapping 为实例新增 NAT 端口映射（host_port 缺省 0 时自动分配）。
+func (h *Handler) V1CreateNATMapping(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req service.CreateNATMappingRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	mapping, err := h.virtualis().CreateNATMapping(c.Request.Context(), id, req)
+	respond(c, mapping, err)
+}
+
+// V1DeleteNATMapping 删除实例的一条 NAT 端口映射。
+func (h *Handler) V1DeleteNATMapping(c *gin.Context) {
+	id, ok := IDParam(c, "id")
+	if !ok {
+		return
+	}
+	mid, err := strconv.ParseUint(c.Param("mid"), 10, 64)
+	if err != nil || mid == 0 {
+		BadRequest(c, "invalid mapping id")
+		return
+	}
+	if err := h.virtualis().DeleteNATMapping(c.Request.Context(), id, uint(mid)); err != nil {
+		respond(c, nil, err)
+		return
+	}
+	noContent(c)
 }

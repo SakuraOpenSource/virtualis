@@ -130,6 +130,10 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	v1.GET("/instances/:id/access", h.V1InstanceAccess)
 	v1.DELETE("/instances/:id", h.DeleteInstance)
 	v1.POST("/instances/:id/power", h.InstancePower)
+	// NAT 端口映射：会话版在 /api/instances/:id/nat，v1 路径树不同不会撞注册。
+	v1.GET("/instances/:id/nat", h.V1ListNATMappings)
+	v1.POST("/instances/:id/nat", h.V1CreateNATMapping)
+	v1.DELETE("/instances/:id/nat/:mid", h.V1DeleteNATMapping)
 	// VNC 短票签发：机器对接方凭站点 Key 领取，转交最终用户浏览器建连。
 	v1.POST("/instances/:id/vnc-ticket", h.V1CreateVNCTicket)
 
