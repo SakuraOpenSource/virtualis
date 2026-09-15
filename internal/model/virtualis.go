@@ -77,6 +77,7 @@ type NetworkConfig struct {
 	Gateway       string   `json:"gateway,omitempty"`
 	DNS           []string `json:"dns,omitempty"`
 	BandwidthMbps int      `json:"bandwidth_mbps,omitempty"`
+	TrafficGB     int      `json:"traffic_gb,omitempty"`
 }
 
 func NormalizeNetworkConfig(network NetworkConfig) (NetworkConfig, error) {
@@ -139,6 +140,9 @@ func NormalizeNetworkConfig(network NetworkConfig) (NetworkConfig, error) {
 	}
 	if network.BandwidthMbps < 0 || network.BandwidthMbps > 100000 {
 		return network, errors.New("带宽需在 0-100000 Mbps 之间")
+	}
+	if network.TrafficGB < 0 || network.TrafficGB > 102400 {
+		return network, errors.New("流量需在 0-102400 GB 之间，0 表示不限")
 	}
 	return network, nil
 }
