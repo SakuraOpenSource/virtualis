@@ -53,7 +53,7 @@ func NewVirtualisService(db *gorm.DB, stores ...*storage.Store) *VirtualisServic
 	if len(stores) > 0 {
 		store = stores[0]
 	}
-	return &VirtualisService{db: db, settings: NewSettingService(db), storage: store}
+	return &VirtualisService{db: db, settings: NewSettingService(db), storage: store, vncTickets: make(map[string]vncTicket)}
 }
 
 // DriverStatus describes drivers installed on at least one connected agent.
@@ -86,16 +86,10 @@ func (s *VirtualisService) ListDrivers(ctx context.Context) []DriverStatus {
 	items := make([]DriverStatus, 0, len(model.AllDrivers()))
 	for _, name := range model.AllDrivers() {
 		if name == model.DriverAuto {
-			available := false
-			for _, ok := range summary {
-				available = available || ok
-			}
-			items = append(items, DriverStatus{Name: name, Available: available})
 			continue
 		}
 		items = append(items, DriverStatus{Name: name, Available: summary[name]})
 	}
-	_ = ctx
 	return items
 }
 

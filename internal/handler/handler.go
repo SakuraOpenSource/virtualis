@@ -20,6 +20,9 @@ type Handler struct {
 	install      *service.InstallService
 	captchaStore *captcha.Store
 	storage      *storage.Store
+	// virtualis 是跨请求单例：VNC 短票存内存 map，若每次请求新建服务，
+	// 签发的票在下一次请求里永远查不到（生产 401 根因）。
+	virtSvc *service.VirtualisService
 }
 
 // New creates a Handler backed by rt.
@@ -29,6 +32,7 @@ func New(rt *runtime.Runtime) *Handler {
 		install:      service.NewInstallService(rt),
 		captchaStore: captcha.NewStore(),
 		storage:      storage.New(rt.DataDir()),
+		virtSvc:      service.NewVirtualisService(rt.DB(), storage.New(rt.DataDir())),
 	}
 }
 
@@ -50,7 +54,7 @@ func (h *Handler) captchaSvc() *service.CaptchaService {
 func (h *Handler) apiKeys() *service.APIKeyService { return service.NewAPIKeyService(h.db()) }
 
 func (h *Handler) virtualis() *service.VirtualisService {
-	return service.NewVirtualisService(h.db(), h.storage)
+	return h.virtSvc
 }
 
 func (h *Handler) agents() *service.AgentService { return service.NewAgentService(h.db()) }
