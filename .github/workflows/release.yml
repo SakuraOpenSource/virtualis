@@ -22,6 +22,11 @@ on:
         description: "Tag to release, e.g. v1.0.0 (created on the current commit if missing)"
         required: false
         type: string
+      prerelease:
+        description: "Force a pre-release (tags with a suffix are always pre-releases)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -44,6 +49,7 @@ jobs:
         id: meta
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TAG" ]; then
             tag="$INPUT_TAG"
@@ -62,7 +68,10 @@ jobs:
               echo "Tag must look like v1.2.3 (stable) or v1.2.3-rc.1 (pre-release), got: $tag"
               exit 1 ;;
           esac
-
+          # The manual checkbox can force a stable tag out as a pre-release.
+          if [ "$INPUT_PRERELEASE" = "true" ]; then
+            prerelease=true
+          fi
           {
             echo "tag=$tag"
             echo "prerelease=$prerelease"
