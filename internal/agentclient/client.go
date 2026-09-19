@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -140,13 +141,35 @@ func New(endpoint, token string) (*Client, error) {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, errors.New("被控地址必须是 http:// 或 https:// 地址")
 	}
+	// 拒绝歧义地址：userinfo 会让凭证进入 URL，query/fragment 会悄悄拼进
+	// 后续的 /api/ 路径，越界端口则把请求导向错误的服务。
+	if u.User != nil {
+		return nil, errors.New("被控地址不能包含用户名密码")
+	}
+	if u.RawQuery != "" || u.Fragment != "" || strings.Contains(endpoint, "#") {
+		return nil, errors.New("被控地址不能包含查询串或锚点")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n <= 0 || n > 65535 {
+			return nil, errors.New("被控地址端口无效")
+		}
+	}
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("被控 token 不能为空")
 	}
 	return &Client{
-		baseURL:    endpoint,
-		token:      token,
-		httpClient: &http.Client{Timeout: 90 * time.Second},
+		baseURL: endpoint,
+		token:   token,
+		// 不跟随重定向：X-Agent-Token 是自定义头，Go 在跨主机重定向时
+		// 不会像 Authorization 那样剥掉它，跟随等于把被控凭证发给重定向
+		// 目标指定的任意地址。3xx 在 do() 里按非 2xx 错误处理。
+		httpClient: &http.Client{
+			Timeout: 90 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -24,6 +25,12 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	eng := gin.New()
+	// 只信任回环代理（生产 Nginx 与后端同机）：gin 默认信任一切代理头，
+	// 远端可伪造 X-Forwarded-For 篡改被控注册时记录的 IP。直连（本地开发）
+	// 没有代理头，ClientIP 就是直连地址。与 Levis 主程序同一口径。
+	if err := eng.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		panic(fmt.Sprintf("设置可信代理失败: %v", err))
+	}
 	eng.Use(gin.Logger(), gin.Recovery(), limitBody(), securityHeaders())
 	eng.MaxMultipartMemory = multipartMemory
 	eng.RedirectTrailingSlash = false
