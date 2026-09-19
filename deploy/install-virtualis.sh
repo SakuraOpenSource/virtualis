@@ -1,384 +1,161 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Virtualis 一键安装脚本（Linux / macOS）—— 主控与被控二合一
+#
+# 用法：
+#   主控:  sudo bash install-virtualis.sh                 # 交互式（默认主控）
+#   被控:  sudo bash install-virtualis.sh --agent \
+#            --master http://MASTER:8080 --token TOKEN [--name node-01]
+#   升级:  加 --update（保留现有 systemd 配置与数据）
+#
+# 可选环境变量 / 参数：
+#   --version VERSION     agent/主控版本（默认 latest，GitHub Releases 拉取）
+#   --gh-proxy URL        GitHub 代理（如 https://gh-proxy.org）
+#   --backends LIST       被控虚拟化后端：qemu,lxc,incus（缺省交互选择）
+#
+# 目录约定（升级互不影响）：
+#   /opt/virtualis/master    主控二进制 + data/
+#   /opt/virtualis/agent     被控二进制 + data/
+# ==============================================================================
 set -Eeuo pipefail
 
-# Virtualis Linux installer/upgrader.
-#
-# Examples:
-#   sudo bash install-virtualis.sh --role master --version latest
-#   sudo bash install-virtualis.sh --role agent --master http://10.0.0.1:8080 --token TOKEN --name node-01 --backend qemu,incus
-#   sudo bash install-virtualis.sh --role agent --update
-#
-# The script deliberately installs the two products into separate fixed
-# prefixes so upgrading one cannot replace the other:
-#   master: /opt/virtualis/virtualis
-#   agent:  /opt/virtualis-agent/virtualis-agent
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-MASTER_DIR="/opt/virtualis"
-AGENT_DIR="/opt/virtualis-agent"
-MASTER_BIN="$MASTER_DIR/virtualis"
-MASTER_AGENT_PACKAGES="$MASTER_DIR/agent-packages"
-AGENT_BIN="$AGENT_DIR/virtualis-agent"
-MASTER_DATA="/var/lib/virtualis"
-AGENT_DATA="/var/lib/virtualis-agent"
-MASTER_SERVICE="virtualis.service"
-AGENT_SERVICE="virtualis-agent.service"
-GITHUB_REPO="SakuraOpenSource/virtualis"
-GITHUB_AGENT_REPO="SakuraOpenSource/virtualis-agent"
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+AGENT_REPO="SakuraOpenSource/virtualis-agent"
+MASTER_REPO="SakuraOpenSource/virtualis"
+MASTER_DIR="/opt/virtualis/master"
+AGENT_DIR="/opt/virtualis/agent"
 VERSION="latest"
 ROLE=""
-BACKENDS=""
-MASTER_URL=""
-AGENT_TOKEN=""
-AGENT_NAME=""
-ADVERTISE=""
-LISTEN=":8081"
-MASTER_LISTEN=""
-SOURCE="auto"
-NO_START=0
-FORCE=0
-DEBUG=0
 UPDATE=0
+NO_START=0
 GH_PROXY=""
-GH_PROXY_SET=0
+MASTER_URL=""; TOKEN=""; AGENT_NAME=""
+BACKENDS=""
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+log()  { echo -e "${GREEN}[virtualis]${NC} $*"; }
+warn() { echo -e "${YELLOW}[virtualis]${NC} $*"; }
+die()  { echo -e "${RED}[virtualis]${NC} $*" >&2; exit 1; }
 
-die() { printf '%b\n' "${RED}错误: $*${NC}" >&2; exit 1; }
-info() { printf '%b\n' "${GREEN}$*${NC}"; }
-warn() { printf '%b\n' "${YELLOW}$*${NC}"; }
-
-usage() {
-  cat <<'EOF'
-Virtualis Linux 安装/升级脚本
-
-用法:
-  sudo bash install-virtualis.sh --role master [选项]
-  sudo bash install-virtualis.sh --role agent --master URL --token TOKEN --name NAME [选项]
-
-通用选项:
-  --role master|agent       安装角色；省略时交互选择
-  --version VERSION         latest 或 v1.0.0，默认 latest
-  --source auto|release|local
-  --backend LIST             qemu,lxc,incus，逗号或空格分隔
-  --update                   只升级已安装角色并保留现有配置
-  --gh-proxy URL             GitHub 代理，例如 https://gh-proxy.org
-                             下载时拼接为 URL/https://github.com/...
-                             传 none 表示禁用代理且不再询问
-  --no-start                 安装后不启动/重启 systemd 服务
-  --force                    允许覆盖不存在的旧服务配置
-  --debug                    显示更多下载/包管理信息
-  -h, --help                显示帮助
-
-主控选项:
-  --data DIR                 主控数据目录，默认 /var/lib/virtualis
-  --listen ADDR              主控监听地址，默认由已有 config 决定或 :8080
-
-被控选项:
-  --master URL               主控地址，例如 http://10.0.0.1:8080
-  --token TOKEN              主控生成的被控 token
-  --name NAME                被控名称
-  --advertise URL            主控可访问的被控地址，例如 http://10.0.0.2:8081
-  --listen ADDR              被控 RPC 监听地址，默认 :8081
-  --data DIR                 被控数据目录，默认 /var/lib/virtualis-agent
-
-示例:
-  sudo bash install-virtualis.sh --role master --backend qemu,incus
-  sudo bash install-virtualis.sh --role agent --master http://10.0.0.1:8080 --token TOKEN --name node-01 --backend qemu --advertise http://10.0.0.2:8081
-  sudo bash install-virtualis.sh --role agent --update
-EOF
-}
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --role) ROLE="${2:-}"; shift 2;;
-    --version) VERSION="${2:-}"; shift 2;;
-    --source) SOURCE="${2:-}"; shift 2;;
-    --backend|--backends) BACKENDS="${2:-}"; shift 2;;
-    --master) MASTER_URL="${2:-}"; shift 2;;
-    --token) AGENT_TOKEN="${2:-}"; shift 2;;
+    --agent) ROLE="agent"; shift;;
+    --master) ROLE="master"; shift;;
+    --master-url) MASTER_URL="${2:-}"; shift 2;;
+    --token) TOKEN="${2:-}"; shift 2;;
     --name) AGENT_NAME="${2:-}"; shift 2;;
-    --advertise) ADVERTISE="${2:-}"; shift 2;;
-    --listen) LISTEN="${2:-}"; shift 2;;
-    --data)
-      if [[ "$ROLE" == "agent" ]]; then AGENT_DATA="${2:-}"; else MASTER_DATA="${2:-}"; fi
-      shift 2
-      ;;
-    --update) SOURCE="release"; UPDATE=1; shift;;
-    --gh-proxy) GH_PROXY="${2:-}"; GH_PROXY_SET=1; shift 2;;
+    --version) VERSION="${2:-latest}"; shift 2;;
+    --backends|--backend) BACKENDS="${2:-}"; shift 2;;
+    --gh-proxy) GH_PROXY="${2:-}"; shift 2;;
+    --update) UPDATE=1; shift;;
     --no-start) NO_START=1; shift;;
-    --force) FORCE=1; shift;;
-    --debug) DEBUG=1; shift;;
-    -h|--help) usage; exit 0;;
-    *) die "未知参数: $1";;
+    -h|--help) usage;;
+    *) die "未知参数: $1（--help 查看用法）";;
   esac
 done
 
-[[ "$(id -u)" -eq 0 ]] || die "请使用 sudo 或 root 执行"
-[[ -f /etc/os-release ]] || die "无法识别 Linux 发行版"
-# /etc/os-release 会定义 VERSION="13 (trixie)" 等变量，需避免覆盖脚本自身的 VERSION/GITHUB_REPO
-_saved_version="$VERSION"
-_saved_github_repo="$GITHUB_REPO"
-_saved_github_agent_repo="$GITHUB_AGENT_REPO"
-# shellcheck disable=SC1091
-. /etc/os-release
-VERSION="$_saved_version"
-GITHUB_REPO="$_saved_github_repo"
-GITHUB_AGENT_REPO="$_saved_github_agent_repo"
+run_root() { if [[ "$(id -u)" -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
 
-if [[ -z "$ROLE" ]]; then
-  echo "请选择安装角色："
-  echo "  1) 主控"
-  echo "  2) 被控"
-  read -r -p "选择 [1]: " role_choice < /dev/tty || role_choice=1
-  [[ "$role_choice" == "2" ]] && ROLE="agent" || ROLE="master"
-fi
-[[ "$ROLE" == "master" || "$ROLE" == "agent" ]] || die "--role 必须是 master 或 agent"
-
-if [[ "$ROLE" == "master" ]]; then
-  # 主控无需安装虚拟化后端，实例均在被控创建
-  BACKENDS=""
-else
-  if [[ -z "$BACKENDS" ]]; then
-    if [[ "$UPDATE" -eq 1 ]]; then
-      BACKENDS=""
-    else
-      echo "请选择虚拟化后端（可多选，空格分隔；回车默认 QEMU/libvirt）："
-      echo "  1) QEMU/libvirt"
-      echo "  2) LXC"
-      echo "  3) Incus"
-      read -r -p "选择 [1]: " backend_choice < /dev/tty || backend_choice=1
-      backend_choice="${backend_choice:-1}"
-      for item in $backend_choice; do
-        case "$item" in
-          1) BACKENDS+=" qemu";;
-          2) BACKENDS+=" lxc";;
-          3) BACKENDS+=" incus";;
-          *) die "未知后端选项: $item";;
-        esac
-      done
-    fi
-  fi
-  BACKENDS="$(printf '%s' "$BACKENDS" | tr ',' ' ' | xargs)"
-  BACKENDS="${BACKENDS//mock/}"
-fi
-
-# GitHub 代理：交互询问 + 归一化校验
-if [[ "$GH_PROXY_SET" -eq 0 && -z "$GH_PROXY" ]]; then
-  echo "是否启用 GitHub 代理加速下载？"
-  read -r -p "输入代理地址（例如 https://gh-proxy.org，回车跳过）: " GH_PROXY < /dev/tty || GH_PROXY=""
-fi
-GH_PROXY="$(printf '%s' "$GH_PROXY" | tr -d '\r\n' | xargs)"
-case "$GH_PROXY" in
-  ""|none|off|no) GH_PROXY="";;
-  http://*|https://*) GH_PROXY="${GH_PROXY%/}";;
-  *) die "GitHub 代理必须以 http:// 或 https:// 开头，例如 https://gh-proxy.org";;
-esac
-[[ -n "$GH_PROXY" ]] && info "已启用 GitHub 代理: $GH_PROXY"
-
-command_exists() { command -v "$1" >/dev/null 2>&1; }
-
-if command_exists apt-get; then
-  PM="apt"
-elif command_exists dnf; then
-  PM="dnf"
-elif command_exists yum; then
-  PM="yum"
-elif command_exists pacman; then
-  PM="pacman"
-elif command_exists apk; then
-  PM="apk"
-else
-  die "不支持的包管理器，请手动安装后端依赖"
-fi
-
-pkg_install() {
-  case "$PM" in
-    apt) DEBIAN_FRONTEND=noninteractive apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y "$@";;
-    dnf) dnf install -y "$@";;
-    yum) yum install -y "$@";;
-    pacman) pacman -Sy --noconfirm "$@";;
-    apk) apk add "$@";;
+detect_platform() {
+  local os arch
+  os="$(uname -s)"; arch="$(uname -m)"
+  case "$os" in
+    Linux)  PLATFORM="linux";;
+    Darwin) PLATFORM="darwin";;
+    *) die "不支持的操作系统: $os（Windows 请使用 install-virtualis.cmd）";;
   esac
-}
-
-install_backend() {
-  local backend="$1"
-  case "$backend" in
-    qemu)
-      info "安装 QEMU/libvirt"
-      case "$PM" in
-        apt) pkg_install qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients;;
-        dnf|yum) pkg_install qemu-kvm qemu-img libvirt libvirt-client;;
-        pacman) pkg_install qemu-desktop libvirt;;
-        apk) pkg_install qemu-img libvirt qemu-system-x86_64;;
-      esac
-      systemctl enable --now libvirtd 2>/dev/null || systemctl enable --now libvirt 2>/dev/null || true
-      if command -v virsh >/dev/null 2>&1; then
-        virsh net-autostart default >/dev/null 2>&1 || true
-        virsh net-start default >/dev/null 2>&1 || true
-      fi
-      ;;
-    lxc)
-      info "安装 LXC"
-      case "$PM" in
-        apt) pkg_install lxc lxc-templates uidmap;;
-        dnf|yum) pkg_install lxc lxc-templates;;
-        pacman) pkg_install lxc;;
-        apk) pkg_install lxc;;
-      esac
-      ;;
-    incus)
-      info "安装 Incus"
-      case "$PM" in
-        apt) pkg_install incus || warn "当前软件源没有 Incus，请按官方文档配置仓库后重跑";;
-        dnf|yum) pkg_install incus || warn "当前软件源没有 Incus，请按官方文档配置仓库后重跑";;
-        pacman) pkg_install incus;;
-        apk) warn "Alpine 请按 Incus 官方文档手动安装";;
-      esac
-      if command_exists incus && ! incus info >/dev/null 2>&1; then
-        incus admin init --auto || true
-      fi
-      ;;
-    *) die "不支持的后端: $backend";;
-  esac
-}
-
-if [[ "$ROLE" == "agent" ]]; then
-  for backend in $BACKENDS; do install_backend "$backend"; done
-else
-  info "主控无需安装虚拟化后端"
-fi
-
-arch_name() {
-  local machine
-  machine="$(uname -m 2>/dev/null | tr -d '\r\n' | xargs)"
-  case "$machine" in
-    x86_64|amd64) echo amd64;;
-    aarch64|arm64) echo arm64;;
-    *) die "不支持的 CPU 架构: $machine";;
+  case "$arch" in
+    x86_64|amd64)  GOARCH="amd64";;
+    arm64|aarch64) GOARCH="arm64";;
+    *) die "不支持的 CPU 架构: $arch";;
   esac
 }
 
 download() {
-  local url="$1" output="$2"
-  url="$(printf '%s' "$url" | tr -d '\r\n' | xargs)"
-  [[ -n "$url" ]] || die "下载地址为空，请检查 VERSION/GITHUB_REPO 参数"
-  # 通过 GitHub 代理下载时，拼接为 https://proxy/https://github.com/...
+  local url="$1" out="$2"
   if [[ -n "$GH_PROXY" && "$url" == *"github.com"* ]]; then
-    url="${GH_PROXY}/${url}"
+    url="${GH_PROXY%/}/$url"
   fi
-  if [[ "$DEBUG" -eq 1 ]]; then info "下载 $url"; fi
-  if command_exists curl; then
-    curl --fail --location --silent --show-error "$url" -o "$output" || die "下载失败: $url (请检查网络或该版本是否存在 Release 产物)"
-  elif command_exists wget; then
-    wget --quiet --output-document="$output" "$url" || die "下载失败: $url"
+  log "下载 $url"
+  if command -v curl >/dev/null 2>&1; then
+    run_root curl -fSL --retry 3 -o "$out" "$url" || die "下载失败: $url"
+  elif command -v wget >/dev/null 2>&1; then
+    run_root wget -qO "$out" "$url" || die "下载失败: $url"
   else
     die "需要 curl 或 wget"
   fi
-  [[ -s "$output" ]] || die "下载得到空文件: $url"
+  [[ -s "$out" ]] || die "下载得到空文件: $url"
 }
 
-binary_from_release() {
-  local name="$1" output="$2" arch version repo
-  arch="$(arch_name)"
-  version="$(printf '%s' "$VERSION" | tr -d '\r\n' | xargs)"
-  if [[ "$name" == "virtualis-agent" ]]; then
-    repo="$(printf '%s' "$GITHUB_AGENT_REPO" | tr -d '\r\n' | xargs)"
+resolve_version() {
+  [[ "$VERSION" != "latest" ]] && return
+  log "获取 virtualis-agent 最新 release 版本..."
+  VERSION="$(run_root curl -fsSLI -o /dev/null -w '%{url_effective}' \
+    "https://github.com/$AGENT_REPO/releases/latest" | sed 's#.*/tag/##')" || true
+  [[ -n "$VERSION" ]] || VERSION="latest"
+  log "版本: $VERSION"
+}
+
+verify_binary_magic() {
+  local file="$1" magic
+  magic="$(od -An -tx1 -N4 "$file" 2>/dev/null | tr -d ' \n')"
+  case "$PLATFORM" in
+    linux)  [[ "$magic" == "7f454c46" ]] || die "下载内容不是有效的 Linux 二进制";;
+    darwin) [[ "$magic" == "cffaedfe" || "$magic" == "feedfacf" || "$magic" == "cafebabe" ]] || die "下载内容不是有效的 macOS 二进制";;
+  esac
+}
+
+# ---------- 主控 ----------
+install_master() {
+  run_root mkdir -p "$MASTER_DIR/data"
+  local bin="/tmp/virtualis-master.$$"
+
+  # 仓库内执行 → 源码构建（可嵌入前端）；否则拉 release。
+  if [[ -f "go.mod" && -d "cmd/virtualis" ]]; then
+    command -v go >/dev/null 2>&1 || die "源码构建需要 Go 1.25+"
+    log "从源码构建主控..."
+    if [[ -d "../virtualis-frontend" ]]; then
+      log "构建前端..."
+      if (cd ../virtualis-frontend && (command -v pnpm >/dev/null 2>&1 || npm install -g pnpm) \
+          && pnpm install --frozen-lockfile && pnpm build); then
+        run_root rm -rf internal/web/dist && run_root mkdir -p internal/web/dist
+        run_root cp -R ../virtualis-frontend/dist/. internal/web/dist/
+        run_root touch internal/web/dist/.gitkeep
+      else
+        warn "前端构建失败，仅后端可用"
+      fi
+    fi
+    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$bin" ./cmd/virtualis
   else
-    repo="$(printf '%s' "$GITHUB_REPO" | tr -d '\r\n' | xargs)"
+    local asset="virtualis-$PLATFORM-$GOARCH"
+    download "https://github.com/$MASTER_REPO/releases/download/$VERSION/$asset" "$bin"
+    verify_binary_magic "$bin"
   fi
-  [[ -n "$arch" && -n "$version" && -n "$repo" ]] || die "下载参数异常: version=$version repo=$repo arch=$arch"
-  if [[ "$version" == "latest" ]]; then
-    download "https://github.com/$repo/releases/latest/download/$name-linux-$arch" "$output"
+  run_root install -m 755 "$bin" "$MASTER_DIR/virtualis"
+  run_root rm -f "$bin"
+
+  # 主控分发的被控包优先本地 agent-packages；否则从 GitHub agent release 同步。
+  local pkgdir="$MASTER_DIR/agent-packages"
+  run_root mkdir -p "$pkgdir"
+  if [[ -d "agent-packages" ]] && compgen -G "agent-packages/virtualis-agent-*" >/dev/null; then
+    run_root install -m 0755 agent-packages/virtualis-agent-* "$pkgdir/" 2>/dev/null || true
   else
-    download "https://github.com/$repo/releases/download/$version/$name-linux-$arch" "$output"
+    resolve_version
+    local a arch
+    for arch in amd64 arm64; do
+      a="/tmp/virtualis-agent-linux-$arch.$$"
+      if download "https://github.com/$AGENT_REPO/releases/download/$VERSION/virtualis-agent-linux-$arch" "$a" 2>/dev/null; then
+        run_root install -m 0755 "$a" "$pkgdir/virtualis-agent-linux-$arch"
+      else
+        warn "跳过 virtualis-agent-linux-$arch（下载失败）"
+      fi
+      run_root rm -f "$a"
+    done
   fi
-}
 
-build_local_master() {
-  [[ -f "$REPO_ROOT/go.mod" ]] || return 1
-  command_exists go || return 1
-  info "从本地源码构建主控"
-  mkdir -p "$REPO_ROOT/internal/web/dist"
-  if [[ -d "$REPO_ROOT/../virtualis-frontend" && -x "$(command -v pnpm || true)" ]]; then
-    (cd "$REPO_ROOT/../virtualis-frontend" && pnpm install --frozen-lockfile && pnpm build)
-    rm -rf "$REPO_ROOT/internal/web/dist"
-    mkdir -p "$REPO_ROOT/internal/web/dist"
-    cp -R "$REPO_ROOT/../virtualis-frontend/dist/." "$REPO_ROOT/internal/web/dist/"
-  fi
-  (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o "$MASTER_BIN.new" ./cmd/virtualis)
-  mv "$MASTER_BIN.new" "$MASTER_BIN"
-}
-
-install_master_agent_packages() {
-  mkdir -p "$MASTER_AGENT_PACKAGES"
-  if [[ "$SOURCE" != "release" && -d "$REPO_ROOT/agent-packages" ]]; then
-    find "$REPO_ROOT/agent-packages" -maxdepth 1 -type f -name 'virtualis-agent-*' -exec install -m 0755 {} "$MASTER_AGENT_PACKAGES/" \;
-    # 兼容部分旧构建脚本未同步到 agent-packages 的情况
-    if [[ ! -f "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-amd64" && -f "$REPO_ROOT/bin/virtualis-agent-linux-amd64" ]]; then
-      install -m 0755 "$REPO_ROOT/bin/virtualis-agent-linux-amd64" "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-amd64"
-    fi
-    if [[ ! -f "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-arm64" && -f "$REPO_ROOT/bin/virtualis-agent-linux-arm64" ]]; then
-      install -m 0755 "$REPO_ROOT/bin/virtualis-agent-linux-arm64" "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-arm64"
-    fi
-    return
-  fi
-  local package_arch package_tmp repo version
-  repo="$(printf '%s' "$GITHUB_AGENT_REPO" | tr -d '\r\n' | xargs)"
-  version="$(printf '%s' "$VERSION" | tr -d '\r\n' | xargs)"
-  for package_arch in amd64 arm64; do
-    package_tmp="$(mktemp)"
-    if [[ "$version" == "latest" ]]; then
-      download "https://github.com/$repo/releases/latest/download/virtualis-agent-linux-$package_arch" "$package_tmp"
-    else
-      download "https://github.com/$repo/releases/download/$version/virtualis-agent-linux-$package_arch" "$package_tmp"
-    fi
-    install -m 0755 "$package_tmp" "$MASTER_AGENT_PACKAGES/virtualis-agent-linux-$package_arch"
-    rm -f "$package_tmp"
-  done
-}
-
-build_local_agent() {
-  [[ -f "$REPO_ROOT/../virtualis-agent/go.mod" ]] || return 1
-  command_exists go || return 1
-  info "从本地源码构建被控"
-  (cd "$REPO_ROOT/../virtualis-agent" && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o "$AGENT_BIN.new" ./cmd/agent)
-  mv "$AGENT_BIN.new" "$AGENT_BIN"
-}
-
-install_binary() {
-  local role="$1"
-  local target source
-  if [[ "$role" == "master" ]]; then
-    target="$MASTER_BIN"
-    if [[ "$SOURCE" != "release" ]] && build_local_master; then
-      install_master_agent_packages
-      return
-    fi
-    source="$(mktemp)"
-    binary_from_release virtualis "$source"
-  else
-    target="$AGENT_BIN"
-    if [[ "$SOURCE" != "release" ]] && build_local_agent; then return; fi
-    source="$(mktemp)"
-    binary_from_release virtualis-agent "$source"
-  fi
-  install -m 0755 "$source" "$target.new"
-  mv "$target.new" "$target"
-  rm -f "$source"
-  [[ "$role" == "master" ]] && install_master_agent_packages
-}
-
-write_master_service() {
-  local listen_arg=""
-  if [[ -n "$MASTER_LISTEN" ]]; then listen_arg=" -listen $MASTER_LISTEN"; fi
-  cat > "/etc/systemd/system/$MASTER_SERVICE" <<EOF
+  if command -v systemctl >/dev/null 2>&1 && [[ "$(uname -s)" == "Linux" ]]; then
+    run_root tee /etc/systemd/system/virtualis.service >/dev/null <<EOF
 [Unit]
 Description=Virtualis Master
 After=network-online.target
@@ -387,26 +164,63 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=$MASTER_DATA
-ExecStart=$MASTER_BIN -data $MASTER_DATA$listen_arg
+WorkingDirectory=$MASTER_DIR
+ExecStart=$MASTER_DIR/virtualis -data $MASTER_DIR/data
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
-NoNewPrivileges=true
-ReadWritePaths=$MASTER_DATA $MASTER_DIR
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    run_root systemctl daemon-reload
+    run_root systemctl enable virtualis >/dev/null
+    if [[ "$NO_START" -eq 0 ]]; then
+      run_root systemctl restart virtualis
+      log "主控已启动: systemctl status virtualis"
+    fi
+  else
+    warn "请手动运行: $MASTER_DIR/virtualis -data $MASTER_DIR/data"
+  fi
+  log "主控目录: $MASTER_DIR   安装向导: http://<本机IP>:8080"
 }
 
-write_agent_service() {
-  [[ -n "$MASTER_URL" ]] || die "被控首次安装必须提供 --master"
-  [[ -n "$AGENT_TOKEN" ]] || die "被控首次安装必须提供 --token"
-  [[ -n "$AGENT_NAME" ]] || AGENT_NAME="$(hostname -s 2>/dev/null || hostname)"
-  local advertise_arg=""
-  [[ -n "$ADVERTISE" ]] && advertise_arg=" --advertise $ADVERTISE"
-  cat > "/etc/systemd/system/$AGENT_SERVICE" <<EOF
+# ---------- 被控 ----------
+install_agent() {
+  if [[ "$UPDATE" -eq 0 ]]; then
+    [[ -n "$MASTER_URL" && -n "$TOKEN" ]] || die "被控安装需要 --master-url 与 --token"
+  fi
+  run_root mkdir -p "$AGENT_DIR/data"
+
+  # agent 一律从 GitHub virtualis-agent release 获取最新版；
+  # GitHub 不可达时回退到主控分发端点 /api/agent/binary。
+  resolve_version
+  local suffix=""; [[ "$PLATFORM" == "windows" ]] && suffix=".exe"
+  local asset="virtualis-agent-$PLATFORM-$GOARCH$suffix"
+  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/virtualis-agent.XXXXXX")"
+  if ! run_root curl -fSL --retry 3 -o "$tmp" \
+      "https://github.com/$AGENT_REPO/releases/download/$VERSION/$asset" 2>/dev/null; then
+    warn "GitHub 下载失败，回退主控分发端点..."
+    [[ -n "$MASTER_URL" ]] || die "未提供 --master-url，无法回退"
+    run_root curl -fSL -o "$tmp" "$MASTER_URL/api/agent/binary?os=$PLATFORM&arch=$GOARCH" \
+      || die "两条下载路径均失败，请手动下载 $asset"
+  fi
+  verify_binary_magic "$tmp"
+
+  run_root install -m 755 "$tmp" "$AGENT_DIR/virtualis-agent"
+  run_root rm -f "$tmp"
+
+  AGENT_NAME="${AGENT_NAME:-node-$(hostname -s 2>/dev/null || echo 01)}"
+
+  # systemd 单元：升级且已有单元时保留原 ExecStart（token/名称不变）。
+  local unit=/etc/systemd/system/virtualis-agent.service
+  if command -v systemctl >/dev/null 2>&1 && [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ "$UPDATE" -eq 1 && -f "$unit" ]]; then
+      run_root systemctl daemon-reload
+      run_root systemctl enable virtualis-agent >/dev/null
+      if [[ "$NO_START" -eq 0 ]]; then run_root systemctl restart virtualis-agent; fi
+    else
+      run_root tee "$unit" >/dev/null <<EOF
 [Unit]
 Description=Virtualis Agent
 After=network-online.target
@@ -415,75 +229,106 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=$AGENT_DATA
-ExecStart=$AGENT_BIN --master $MASTER_URL --token $AGENT_TOKEN --name $AGENT_NAME --listen $LISTEN --data $AGENT_DATA$advertise_arg
+WorkingDirectory=$AGENT_DIR
+ExecStart=$AGENT_DIR/virtualis-agent --master $MASTER_URL --token $TOKEN --name $AGENT_NAME --data $AGENT_DIR/data
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
-NoNewPrivileges=false
-ReadWritePaths=$AGENT_DATA $AGENT_DIR
 
 [Install]
 WantedBy=multi-user.target
 EOF
-}
-
-install_master() {
-  MASTER_LISTEN="${MASTER_LISTEN:-}"
-  mkdir -p "$MASTER_DIR" "$MASTER_DATA"
-  install_binary master
-  write_master_service
-  systemctl daemon-reload
-  systemctl enable "$MASTER_SERVICE"
-  if [[ "$NO_START" -eq 0 ]]; then systemctl restart "$MASTER_SERVICE"; fi
-  info "主控已安装: $MASTER_BIN"
-  info "内置被控包目录: $MASTER_AGENT_PACKAGES"
-  info "数据目录: $MASTER_DATA"
-  info "服务: systemctl status $MASTER_SERVICE"
-}
-
-install_agent() {
-  mkdir -p "$AGENT_DIR" "$AGENT_DATA"
-  if [[ -f "/etc/systemd/system/$AGENT_SERVICE" && -z "$MASTER_URL" ]]; then
-    # Upgrade path: preserve the existing ExecStart configuration.
-    install_binary agent
-    systemctl daemon-reload
-    systemctl enable "$AGENT_SERVICE"
-    if [[ "$NO_START" -eq 0 ]]; then systemctl restart "$AGENT_SERVICE"; fi
+      run_root systemctl daemon-reload
+      run_root systemctl enable virtualis-agent >/dev/null
+      if [[ "$NO_START" -eq 0 ]]; then
+        run_root systemctl restart virtualis-agent
+        log "被控已启动: systemctl status virtualis-agent"
+      fi
+    fi
   else
-    install_binary agent
-    write_agent_service
-    systemctl daemon-reload
-    systemctl enable "$AGENT_SERVICE"
-    if [[ "$NO_START" -eq 0 ]]; then systemctl restart "$AGENT_SERVICE"; fi
+    warn "请手动运行:"
+    echo "  $AGENT_DIR/virtualis-agent --master $MASTER_URL --token $TOKEN --name $AGENT_NAME --data $AGENT_DIR/data"
   fi
-  info "被控已安装: $AGENT_BIN"
-  info "数据目录: $AGENT_DATA"
-  info "服务: systemctl status $AGENT_SERVICE"
+  log "被控目录: $AGENT_DIR   名称: $AGENT_NAME   主控: $MASTER_URL"
 }
 
-mkdir -p "$MASTER_DIR" "$AGENT_DIR"
-if [[ "$ROLE" == "master" ]]; then
-  MASTER_LISTEN="$LISTEN"
-  [[ "$MASTER_LISTEN" == ":8081" ]] && MASTER_LISTEN=""
-  install_master
-else
+# ---------- 虚拟化后端（仅被控，Linux） ----------
+install_backends() {
+  [[ "$(uname -s)" == "Linux" ]] || { warn "macOS 虚拟化后端请手动安装（brew install qemu）"; return; }
+  local pm=""
+  if command -v apt-get >/dev/null 2>&1; then pm="apt"
+  elif command -v dnf >/dev/null 2>&1; then pm="dnf"
+  elif command -v yum >/dev/null 2>&1; then pm="yum"
+  elif command -v pacman >/dev/null 2>&1; then pm="pacman"
+  elif command -v apk >/dev/null 2>&1; then pm="apk"
+  fi
+  [[ -n "$pm" ]] || { warn "未知包管理器，请手动安装虚拟化后端"; return; }
+  pkg_install() {
+    case "$pm" in
+      apt) DEBIAN_FRONTEND=noninteractive run_root apt-get update; DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "$@";;
+      dnf) run_root dnf install -y "$@";;
+      yum) run_root yum install -y "$@";;
+      pacman) run_root pacman -Sy --noconfirm "$@";;
+      apk) run_root apk add "$@";;
+    esac
+  }
+  local b
+  for b in $BACKENDS; do
+    case "$b" in
+      qemu|qemu-kvm)
+        log "安装 QEMU/libvirt..."
+        case "$pm" in
+          apt) pkg_install qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients;;
+          dnf|yum) pkg_install qemu-kvm qemu-img libvirt;;
+          pacman) pkg_install qemu-desktop libvirt;;
+          apk) pkg_install qemu-img libvirt;;
+        esac
+        run_root systemctl enable --now libvirtd 2>/dev/null || true
+        ;;
+      lxc)
+        log "安装 LXC..."
+        pkg_install lxc lxc-templates uidmap 2>/dev/null || pkg_install lxc
+        ;;
+      incus)
+        log "安装 Incus..."
+        pkg_install incus 2>/dev/null || warn "软件源无 Incus，请按 https://linuxcontainers.org/incus/docs/main/install_incus/ 配置仓库"
+        if command -v incus >/dev/null 2>&1 && ! run_root incus info >/dev/null 2>&1; then
+          run_root incus admin init --auto || true
+        fi
+        ;;
+      *) warn "未知后端: $b";;
+    esac
+  done
+}
+
+# ---------- main ----------
+detect_platform
+
+if [[ -z "$ROLE" ]]; then
+  echo "请选择安装角色："
+  echo "  1) 主控（/opt/virtualis/master）"
+  echo "  2) 被控（/opt/virtualis/agent）"
+  read -r -p "选择 [1]: " choice < /dev/tty || choice=1
+  [[ "$choice" == "2" ]] && ROLE="agent" || ROLE="master"
+fi
+
+if [[ "$ROLE" == "agent" ]]; then
+  if [[ -z "$BACKENDS" && "$UPDATE" -eq 0 && -t 0 ]]; then
+    echo "选择虚拟化后端（可多选，空格分隔，回车跳过）:"
+    echo "  1) QEMU   2) LXC   3) Incus"
+    read -r -p "选择: " sel < /dev/tty || sel=""
+    for s in $sel; do
+      case "$s" in
+        1) BACKENDS+=" qemu";;
+        2) BACKENDS+=" lxc";;
+        3) BACKENDS+=" incus";;
+      esac
+    done
+  fi
+  BACKENDS="$(printf '%s' "$BACKENDS" | tr ',' ' ' | xargs)"
+  install_backends
   install_agent
+else
+  install_master
 fi
-
-# 主控无需后端，展示更清晰
-display_backend="$BACKENDS"
-if [[ "$ROLE" == "master" ]]; then
-  display_backend="无需（实例在被控创建）"
-elif [[ -z "$display_backend" ]]; then
-  display_backend="未安装（仅运行被控）"
-fi
-
-cat <<EOF
-
-Virtualis 安装/升级完成
-角色: $ROLE
-后端: $display_backend
-主控目录: $MASTER_DIR
-被控目录: $AGENT_DIR
-EOF
+log "完成。"

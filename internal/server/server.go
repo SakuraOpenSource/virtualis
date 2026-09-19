@@ -129,6 +129,7 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	v1 := eng.Group("/api/v1", middleware.RequireInstalled(rt), middleware.RequireAPIKey(rt))
 	v1.GET("/images", h.V1Images)
 	v1.POST("/instances", h.V1CreateInstance)
+	v1.GET("/agents", h.V1Agents)
 	v1.GET("/instances", h.Instances)
 	v1.GET("/instances/:id", h.Instance)
 	v1.GET("/instances/:id/status", h.InstanceStatus)

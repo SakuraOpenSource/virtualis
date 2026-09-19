@@ -1,103 +1,62 @@
 # Virtualis 部署
 
-本目录提供一键部署脚本，支持选择虚拟化后端并区分主控/被控。
+本目录提供一键部署脚本（Linux / macOS / Windows），统一目录约定：
+
+- 主控：`/opt/virtualis/master`（二进制 + `data/` + `agent-packages/`）
+- 被控：`/opt/virtualis/agent`（二进制 + `data/`）
+
+Windows 等价目录：`C:\opt\virtualis\master` 与 `C:\opt\virtualis\agent`。
 
 ## 快速开始
 
-### 统一 Linux 安装/升级脚本
-
-`install-virtualis.sh` 安装到固定目录 `/opt/virtualis` 和 `/opt/virtualis-agent`，并创建/更新 systemd 服务：
+### Linux / macOS：install-virtualis.sh
 
 ```bash
-# 主控
-sudo bash deploy/install-virtualis.sh --role master --backend qemu,incus
+# 主控（仓库内执行会自动源码构建并嵌入前端；否则拉 GitHub release）
+sudo bash deploy/install-virtualis.sh
 
-# 被控首次安装
-sudo bash deploy/install-virtualis.sh \
-  --role agent \
-  --master http://MASTER_IP:8080 \
+# 主控（指定 GitHub 代理）
+sudo bash deploy/install-virtualis.sh --gh-proxy https://gh-proxy.org
+
+# 被控首次安装（虚拟化后端可交互选择或 --backends qemu,incus）
+sudo bash deploy/install-virtualis.sh --agent \
+  --master-url http://MASTER_IP:8080 \
   --token JOIN_TOKEN \
   --name node-01 \
-  --advertise http://AGENT_IP:8081 \
-  --backend qemu,incus
+  --backends qemu,incus
 
-# 已安装节点升级，保留现有 systemd 参数
-sudo bash deploy/install-virtualis.sh --role master --update
-sudo bash deploy/install-virtualis.sh --role agent --update
-
-# 使用 GitHub 代理加速（可选）
-# 交互式会询问代理地址；也可通过参数指定，不需要则回车跳过或传 none
-sudo bash deploy/install-virtualis.sh --role master --gh-proxy https://gh-proxy.org
-sudo bash deploy/install-virtualis.sh --role agent --master http://MASTER_IP:8080 --token TOKEN --name node-01 --gh-proxy https://gh-proxy.org
-# 实际下载地址会变为 https://gh-proxy.org/https://github.com/SakuraOpenSource/virtualis/releases/...
+# 已安装节点升级（保留现有 systemd 参数与数据）
+sudo bash deploy/install-virtualis.sh --agent --update
+sudo bash deploy/install-virtualis.sh --master --update
 ```
 
-服务名分别为 `virtualis.service` 和 `virtualis-agent.service`。二进制分别位于 `/opt/virtualis/virtualis` 与 `/opt/virtualis-agent/virtualis-agent`，数据目录分别为 `/var/lib/virtualis` 与 `/var/lib/virtualis-agent`。
+被控二进制一律从 **GitHub virtualis-agent Releases** 获取最新版；
+GitHub 不可达时自动回退主控分发端点 `/api/agent/binary`。
 
-如果忘记管理员密码，可在主控上执行：
+### Windows：install-virtualis.cmd
 
-```bash
-sudo systemctl stop virtualis
-sudo /opt/virtualis/virtualis -data /var/lib/virtualis --reset-password
-sudo systemctl start virtualis
-```
+以管理员身份运行 CMD：
 
-### Linux
-```bash
-sudo bash deploy/install-linux.sh          # 主控
-sudo bash deploy/install-linux.sh --agent  # 被控
-```
-
-### macOS
-```bash
-bash deploy/install-macos.sh
-bash deploy/install-macos.sh --agent
-```
-
-### Windows (管理员 PowerShell/CMD)
 ```bat
-deploy\install.bat
-deploy\install.bat --agent
+REM 主控
+install-virtualis.cmd
+
+REM 被控
+install-virtualis.cmd --agent --master-url http://MASTER:8080 --token TOKEN --name node-01
 ```
 
-脚本会交互式询问：
+### macOS：install-macos.sh
 
-1. **部署角色**：主控（含前端） / 被控（仅 Go 后端）
-2. **虚拟化后端**：可多选 `QEMU/LXC/Incus`
-   - `QEMU` 需 `qemu-kvm` / `libvirt`，支持 VNC 与 QCOW2/ISO 挂载
-   - `LXC` 需 `lxc`
-   - `Incus` 推荐，同时支持容器与虚拟机（需 `incus`）
+兼容入口，直接转发到 `install-virtualis.sh`，参数相同。
 
-随后自动安装所选后端、构建 Virtualis（若在源码目录则本地编译，否则从 GitHub Releases 下载）、写入 systemd/launchd/Windows 服务并启动。
+## systemd 服务
 
-## 主控-被控
+- 主控：`virtualis.service` → `/opt/virtualis/master/virtualis -data /opt/virtualis/master/data`
+- 被控：`virtualis-agent.service` → `/opt/virtualis/agent/virtualis-agent --master ... --token ... --data /opt/virtualis/agent/data`
 
-- **被控**：仅 Go 后端，无前端。`deploy/install-*.sh --agent` 或直接运行 `virtualis-agent` 二进制。
-- **添加被控**：在主控 Web 控制台 `被控节点 → 添加被控` 输入名称，生成两条指令：
-  - `sudo ./virtualis-agent --master http://MASTER:8080 --token <token> --name node-01`
-  - `curl -fsSL http://MASTER:8080/api/agent/install.sh | bash -s -- --master http://MASTER:8080 --token <token>`
-- 在被控机器上以 root 执行任一指令，自动注册并心跳（30s）到主控，主控侧状态变为 `online`。
+## 被控版本管理
 
-## 手动
-
-- 主控：`virtualis -data /var/lib/virtualis` → 访问 `http://IP:8080` 完成安装
-- 被控：`virtualis-agent --master http://MASTER:8080 --token <token> --name node-01 --listen :8081`
-
-## 一键安装 QEMU/LXC/Incus 被控脚本在哪里
-
-- **被控专用（已整合至 Agent）**：`virtualis-agent/install.sh` – 内置可选，交互式 4 选 1 后直接接入主控
-  ```bash
-  sudo bash virtualis-agent/install.sh --master http://MASTER:8080 --token <token> --name node-01 --mode 2
-  # 或交互式（提示 1 仅 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent）
-  sudo bash virtualis-agent/install.sh
-  ```
-  可选择：`1 仅安装 Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent`
-- **通用**：`deploy/install-linux.sh --agent` / `install-macos.sh --agent` / `install.bat --agent` 仍支持多选 `QEMU/LXC/Incus`，内部复用同一后端安装逻辑
-- 主控也可在 `deploy/install-linux.sh` 直接选后端一并安装
-
-## 目录
-
-- `install-linux.sh` – Linux 主控/被控通用（apt/dnf/yum/pacman/apk）
-- `virtualis-agent/install.sh` – Linux 被控专用一键（内置 1 仅Agent / 2 Incus+Agent / 3 LXC+Agent / 4 QEMU+Agent）
-- `install-macos.sh` – macOS 主控/被控（Homebrew）
-- `install.bat` – Windows 主控/被控（winget/choco 安装 QEMU；LXC/Incus 提示 WSL2）
+- `--version v1.2.3` 指定 agent release tag；缺省 `latest`
+- 主控安装时会把 agent 二进制同步进 `agent-packages/`（优先本地
+  `agent-packages/`，否则从 GitHub agent release 下载 linux amd64/arm64）
+- 被控端 `/api/agent/binary` 分发端点仅在 GitHub 不可达时作为回退使用

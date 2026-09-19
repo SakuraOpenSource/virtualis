@@ -25,6 +25,36 @@ func (h *Handler) Agents(c *gin.Context) {
 	respond(c, gin.H{"items": items}, err)
 }
 
+// V1Agents 返回被控节点的公开摘要（id/名称/状态/驱动），供对接方
+// （如 Levis 的 virtualis 插件）在开通前选择部署节点。
+// 只暴露安全字段：不含 token、endpoint 等内部信息。
+func (h *Handler) V1Agents(c *gin.Context) {
+	h.agents().MarkOfflineIfStale(90 * time.Second)
+	items, err := h.agents().List()
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	type agentSummary struct {
+		ID          uint     `json:"id"`
+		Name        string   `json:"name"`
+		DisplayName string   `json:"display_name"`
+		Status      string   `json:"status"`
+		Drivers     []string `json:"drivers"`
+	}
+	out := make([]agentSummary, 0, len(items))
+	for _, item := range items {
+		out = append(out, agentSummary{
+			ID:          item.ID,
+			Name:        item.Name,
+			DisplayName: item.DisplayName,
+			Status:      item.Status,
+			Drivers:     item.Drivers,
+		})
+	}
+	respond(c, gin.H{"items": out}, nil)
+}
+
 func (h *Handler) CreateAgent(c *gin.Context) {
 	var req createAgentReq
 	if !bindJSON(c, &req) {
@@ -70,7 +100,7 @@ func (h *Handler) agentSetup(c *gin.Context, agent *model.Agent, token string) g
 	}
 	masterURL := scheme + "://" + master
 	joinCmd := "sudo ./virtualis-agent --master " + shellQuote(masterURL) + " --token " + shellQuote(token) + " --name " + shellQuote(agent.Name)
-	curlCmd := "curl -fsSL " + shellQuote(masterURL+"/api/agent/install.sh") + " | bash -s -- --master " + shellQuote(masterURL) + " --token " + shellQuote(token) + " --name " + shellQuote(agent.Name)
+	curlCmd := "curl -fsSL " + shellQuote(masterURL+"/api/agent/install.sh") + " | bash -s -- --master-url " + shellQuote(masterURL) + " --token " + shellQuote(token) + " --name " + shellQuote(agent.Name)
 	return gin.H{
 		"agent":     agent,
 		"token":     token,
@@ -213,6 +243,9 @@ func agentDownloads(base string) []gin.H {
 
 func (h *Handler) AgentInstallScript(c *gin.Context) {
 	master := c.Query("master")
+	if master == "" {
+		master = c.Query("master-url")
+	}
 	token := c.Query("token")
 	if master == "" {
 		scheme := "http"
@@ -225,6 +258,14 @@ func (h *Handler) AgentInstallScript(c *gin.Context) {
 	const script = `#!/usr/bin/env bash
 set -Eeuo pipefail
 
+# ==============================================================================
+# Virtualis 被控一键安装脚本（由主控生成并分发）
+#
+# 被控二进制优先从 GitHub virtualis-agent release 获取最新版；
+# GitHub 不可达时回退主控分发端点 /api/agent/binary。
+# 目录约定：/opt/virtualis/agent
+# ==============================================================================
+
 MASTER=%s
 TOKEN=%s
 NAME=""
@@ -232,7 +273,7 @@ MODE=""
 ADVERTISE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --master) MASTER="${2:-}"; shift 2;;
+    --master|--master-url) MASTER="${2:-}"; shift 2;;
     --token) TOKEN="${2:-}"; shift 2;;
     --name) NAME="${2:-}"; shift 2;;
     --mode) MODE="${2:-}"; shift 2;;
@@ -242,10 +283,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$MASTER" || -z "$TOKEN" ]]; then
-  echo "用法: $0 --master http://MASTER:8080 --token TOKEN [--name node-01] [--mode 1-3]"
+  echo "用法: $0 --master-url http://MASTER:8080 --token TOKEN [--name node-01] [--mode 1-3]"
   exit 1
 fi
-NAME="${NAME:-node-$(hostname 2>/dev/null || true)}"
+NAME="${NAME:-node-$(hostname -s 2>/dev/null || true)}"
 NAME="${NAME:-agent}"
 
 if [[ -z "$MODE" ]]; then
@@ -285,17 +326,47 @@ case "$UNAME_M" in
 esac
 if [[ "$GOOS" == "windows" && "$GOARCH" != "amd64" ]]; then echo "Windows 被控仅提供 amd64"; exit 1; fi
 SUFFIX=""; [[ "$GOOS" == "windows" ]] && SUFFIX=.exe
-URL="$MASTER/api/agent/binary?os=$GOOS&arch=$GOARCH"
+
+AGENT_REPO="SakuraOpenSource/virtualis-agent"
+ASSET="virtualis-agent-$GOOS-$GOARCH$SUFFIX"
 TMP="${TMPDIR:-/tmp}/virtualis-agent.$$${SUFFIX}"
 trap 'rm -f "$TMP"' EXIT
-echo "从主控下载被控安装包: $GOOS/$GOARCH"
-if command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error --location "$URL" -o "$TMP"; elif command -v wget >/dev/null 2>&1; then wget -qO "$TMP" "$URL"; else echo "需要 curl 或 wget"; exit 1; fi
+
+# 1) 解析 agent 最新 release tag；失败则停留在 latest 直链。
+VERSION="latest"
+if command -v curl >/dev/null 2>&1; then
+  VERSION="$(run_root curl -fsSLI -o /dev/null -w '%%{url_effective}' "https://github.com/$AGENT_REPO/releases/latest" 2>/dev/null | sed 's#.*/tag/##')" || VERSION="latest"
+fi
+[[ -n "$VERSION" ]] || VERSION="latest"
+echo "被控版本: $VERSION"
+
+# 2) GitHub release 直链下载；失败回退主控分发端点。
+GH_URL="https://github.com/$AGENT_REPO/releases/download/$VERSION/$ASSET"
+MC_URL="$MASTER/api/agent/binary?os=$GOOS&arch=$GOARCH"
+echo "从 GitHub 下载: $ASSET"
+if command -v curl >/dev/null 2>&1; then
+  curl --fail --silent --show-error --location --retry 3 "$GH_URL" -o "$TMP" || true
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO "$TMP" "$GH_URL" || true
+else
+  echo "需要 curl 或 wget"; exit 1
+fi
+if [[ ! -s "$TMP" || "$(od -An -tx1 -N4 "$TMP" 2>/dev/null | tr -d ' \n')" != "7f454c46" && "$(od -An -tx1 -N4 "$TMP" 2>/dev/null | tr -d ' \n')" != "cffaedfe" && "$(od -An -tx1 -N4 "$TMP" 2>/dev/null | tr -d ' \n')" != "feedfacf" && "$(od -An -tx1 -N4 "$TMP" 2>/dev/null | tr -d ' \n')" != "4d5a" ]]; then
+  echo "GitHub 下载失败或内容无效，回退主控分发端点..."
+  run_root rm -f "$TMP"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --silent --show-error --location "$MC_URL" -o "$TMP" || { echo "两条下载路径均失败"; exit 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$TMP" "$MC_URL" || { echo "两条下载路径均失败"; exit 1; }
+  fi
+fi
 chmod +x "$TMP" 2>/dev/null || true
 MAGIC="$(od -An -tx1 -N4 "$TMP" 2>/dev/null | tr -d ' \n')"
-if [[ "$GOOS" == "windows" ]]; then [[ "$MAGIC" == 4d5a ]] || { echo "主控返回的不是有效 Windows 安装包"; exit 1; }; else [[ "$MAGIC" == 7f454c46 ]] || { echo "主控返回的不是有效 Unix 安装包"; exit 1; }; fi
+if [[ "$GOOS" == "windows" ]]; then [[ "$MAGIC" == 4d5a ]] || { echo "主控返回的不是有效 Windows 安装包"; exit 1; }; else [[ "$MAGIC" == 7f454c46 || "$MAGIC" == cffaedfe || "$MAGIC" == feedfacf ]] || { echo "下载内容不是有效安装包"; exit 1; }; fi
 
 if [[ "$GOOS" == "linux" ]]; then
-  DEST=/usr/local/bin/virtualis-agent
+  DEST=/opt/virtualis/agent/virtualis-agent
+  run_root mkdir -p /opt/virtualis/agent/data
   run_root install -m 755 "$TMP" "$DEST"
   if command -v systemctl >/dev/null 2>&1; then
     run_root mkdir -p /etc/systemd/system
@@ -303,12 +374,14 @@ if [[ "$GOOS" == "linux" ]]; then
     SERVICE="[Unit]
 Description=Virtualis Agent
 After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=$DEST --master $MASTER --token $TOKEN --name $NAME$ADV_ARG
+ExecStart=$DEST --master $MASTER --token $TOKEN --name $NAME --data /opt/virtualis/agent/data$ADV_ARG
 Restart=always
 RestartSec=5
 User=root
+WorkingDirectory=/opt/virtualis/agent
 
 [Install]
 WantedBy=multi-user.target
@@ -318,10 +391,11 @@ WantedBy=multi-user.target
     run_root systemctl enable --now virtualis-agent
   fi
 elif [[ "$GOOS" == "darwin" ]]; then
-  DEST=/usr/local/bin/virtualis-agent
+  DEST=/opt/virtualis/agent/virtualis-agent
+  run_root mkdir -p /opt/virtualis/agent/data
   run_root install -m 755 "$TMP" "$DEST"
 else
-  DEST="${ProgramFiles:-C:/Program Files}/Virtualis/virtualis-agent.exe"
+  DEST="C:/opt/virtualis/agent/virtualis-agent.exe"
   mkdir -p "$(dirname "$DEST")" 2>/dev/null || true
   cp "$TMP" "$DEST"
 fi
