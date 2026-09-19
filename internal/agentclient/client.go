@@ -86,14 +86,16 @@ type HostNetworkSummary struct {
 }
 
 type Metrics struct {
-	CPUPercent     float64   `json:"cpu_percent"`
-	MemoryUsedMB   int64     `json:"memory_used_mb"`
-	MemoryTotalMB  int64     `json:"memory_total_mb"`
-	NetworkRxBytes uint64    `json:"network_rx_bytes"`
-	NetworkTxBytes uint64    `json:"network_tx_bytes"`
-	BandwidthRxBps float64   `json:"bandwidth_rx_bps"`
-	BandwidthTxBps float64   `json:"bandwidth_tx_bps"`
-	CollectedAt    time.Time `json:"collected_at"`
+	CPUPercent           float64   `json:"cpu_percent"`
+	MemoryUsedMB         int64     `json:"memory_used_mb"`
+	MemoryTotalMB        int64     `json:"memory_total_mb"`
+	NetworkRxBytes       uint64    `json:"network_rx_bytes"`
+	NetworkTxBytes       uint64    `json:"network_tx_bytes"`
+	BandwidthRxBps       float64   `json:"bandwidth_rx_bps"`
+	BandwidthTxBps       float64   `json:"bandwidth_tx_bps"`
+	TrafficUsedBytes     uint64    `json:"traffic_used_bytes"`
+	TrafficQuotaExceeded bool      `json:"traffic_quota_exceeded"`
+	CollectedAt          time.Time `json:"collected_at"`
 }
 
 type NetworkInterface struct {
