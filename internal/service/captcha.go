@@ -8,10 +8,9 @@ import (
 	"github.com/SakuraOpenSource/virtualis/internal/captcha"
 )
 
-const (
-	CaptchaSceneLogin    = "login"
-	CaptchaSceneRegister = "register"
-)
+// CaptchaSceneLogin 是唯一的验证码场景：本系统为单管理员部署，没有注册
+// 入口，「注册验证码」是从 Levis 抄来的死设置，已删除。
+const CaptchaSceneLogin = "login"
 
 // CaptchaStore is the minimal interface needed from captcha.Store.
 type CaptchaStore interface {
@@ -39,11 +38,7 @@ func (s *CaptchaService) Issue() (*captcha.Challenge, error) {
 // Verify checks captcha if enabled for the given scene.
 func (s *CaptchaService) Verify(scene, id, answer string) error {
 	cfg := s.settings.Captcha()
-	enabled := cfg.RegisterEnabled
-	if scene == CaptchaSceneLogin {
-		enabled = cfg.LoginEnabled
-	}
-	if !enabled {
+	if scene != CaptchaSceneLogin || !cfg.LoginEnabled {
 		return nil
 	}
 	if strings.TrimSpace(answer) == "" {

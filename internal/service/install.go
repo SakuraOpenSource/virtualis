@@ -150,9 +150,8 @@ type Bootstrap struct {
 
 // CaptchaScenes indicates which forms require captcha.
 type CaptchaScenes struct {
-	Login    bool   `json:"login"`
-	Register bool   `json:"register"`
-	Charset  string `json:"charset,omitempty"`
+	Login   bool   `json:"login"`
+	Charset string `json:"charset,omitempty"`
 }
 
 // Bootstrap collects installation status and site settings.
@@ -166,10 +165,7 @@ func (s *InstallService) Bootstrap() Bootstrap {
 	out.SiteName = site.Name
 	out.SiteDescription = site.Description
 	cap := ss.Captcha()
-	out.Captcha = CaptchaScenes{
-		Login:    cap.LoginEnabled,
-		Register: cap.RegisterEnabled,
-	}
+	out.Captcha = CaptchaScenes{Login: cap.LoginEnabled}
 	return out
 }
 

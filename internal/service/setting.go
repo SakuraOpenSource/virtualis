@@ -15,8 +15,7 @@ const (
 	KeySiteName        = "site_name"
 	KeySiteDescription = "site_description"
 
-	KeyCaptchaLogin    = "captcha_login"
-	KeyCaptchaRegister = "captcha_register"
+	KeyCaptchaLogin = "captcha_login"
 
 	KeyVirtDefaultDriver  = "virtualis_default_driver"
 	KeyVirtDefaultCPU     = "virtualis_default_cpu"
@@ -35,9 +34,11 @@ type SiteConfig struct {
 }
 
 // CaptchaConfig holds captcha feature flags.
+//
+// 只剩登录场景：系统没有注册入口，register_enabled 已随注册验证码删除。
+// 数据库里遗留的 captcha_register 行不再被读取，留着无害。
 type CaptchaConfig struct {
-	LoginEnabled    bool `json:"login_enabled"`
-	RegisterEnabled bool `json:"register_enabled"`
+	LoginEnabled bool `json:"login_enabled"`
 }
 
 // VirtualisSettings holds virtualization defaults.
@@ -117,15 +118,12 @@ func (s *SettingService) SaveSite(in SiteConfig) (SiteConfig, error) {
 
 // Captcha returns captcha config with defaults.
 func (s *SettingService) Captcha() CaptchaConfig {
-	out := CaptchaConfig{LoginEnabled: false, RegisterEnabled: false}
+	out := CaptchaConfig{}
 	var rows []model.Setting
-	_ = s.db.Where(map[string]any{"key": []string{KeyCaptchaLogin, KeyCaptchaRegister}}).Find(&rows).Error
+	_ = s.db.Where(map[string]any{"key": KeyCaptchaLogin}).Find(&rows).Error
 	for _, r := range rows {
-		switch r.Key {
-		case KeyCaptchaLogin:
+		if r.Key == KeyCaptchaLogin {
 			out.LoginEnabled = r.Value == "1"
-		case KeyCaptchaRegister:
-			out.RegisterEnabled = r.Value == "1"
 		}
 	}
 	return out
@@ -135,7 +133,6 @@ func (s *SettingService) Captcha() CaptchaConfig {
 func (s *SettingService) SaveCaptcha(in CaptchaConfig) (CaptchaConfig, error) {
 	rows := []model.Setting{
 		{Key: KeyCaptchaLogin, Value: boolVal(in.LoginEnabled)},
-		{Key: KeyCaptchaRegister, Value: boolVal(in.RegisterEnabled)},
 	}
 	if err := s.upsert(rows); err != nil {
 		return CaptchaConfig{}, err
