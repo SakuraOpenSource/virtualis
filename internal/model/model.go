@@ -71,5 +71,7 @@ func AllModels() []any {
 		&InstanceOperationLog{},
 		&IPPool{},
 		&IPPoolEntry{},
+		&VPC{},
+		&FirewallRule{},
 	}
 }

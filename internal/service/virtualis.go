@@ -127,7 +127,7 @@ func (s *VirtualisService) ListInstances(page, pageSize int) ([]model.Instance, 
 // GetInstance returns instance by id.
 func (s *VirtualisService) GetInstance(id uint) (*model.Instance, error) {
 	var inst model.Instance
-	if err := s.db.Preload("Image").Preload("Agent").Preload("NATMappings").First(&inst, id).Error; err != nil {
+	if err := s.db.Preload("Image").Preload("Agent").Preload("NATMappings").Preload("VPC").Preload("FirewallRules", func(db *gorm.DB) *gorm.DB { return db.Order("priority ASC, id ASC") }).First(&inst, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, NotFound("instance not found")
 		}
@@ -149,6 +149,7 @@ type CreateInstanceRequest struct {
 	MaxNATMappings int `json:"max_nat_mappings"`
 	// IPPoolEntryID 指定独立 IP 模式下从地址池选择的地址；0/空表示手填。
 	IPPoolEntryID *uint `json:"ip_pool_entry_id"`
+	VPCID         *uint `json:"vpc_id"`
 	// AutoPassword 为 true（默认）时生成随机 root 密码并存库供管理页查看。
 	AutoPassword *bool `json:"auto_password"`
 }
@@ -249,6 +250,33 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 		}
 	}
 	// 默认网卡只作用于 dedicated 模式；NAT 必须继续使用 incusbr0/
+	if strings.EqualFold(strings.TrimSpace(req.Network.Mode), model.NetworkModeVPC) {
+		if req.VPCID == nil || *req.VPCID == 0 {
+			return nil, BadRequest("VPC 模式必须选择网络")
+		}
+		vpc, vpcErr := s.GetVPC(*req.VPCID)
+		if vpcErr != nil {
+			return nil, vpcErr
+		}
+		if vpc.AgentID != agent.ID {
+			return nil, BadRequest("VPC 不属于所选节点")
+		}
+		if driverName == model.DriverAuto {
+			driverName = vpc.Driver
+		}
+		if driverName != vpc.Driver {
+			return nil, BadRequest("VPC 与实例驱动必须一致")
+		}
+		req.Network.Bridge = vpc.Name
+		if req.Network.Gateway == "" {
+			req.Network.Gateway = vpc.Gateway
+		}
+		if len(req.Network.DNS) == 0 {
+			req.Network.DNS = append([]string(nil), vpc.DNS...)
+		}
+	} else if req.VPCID != nil {
+		return nil, BadRequest("只有 VPC 模式可以选择 VPC")
+	}
 	// virbr0，none 模式不应注入任何挂载目标。显式 bridge 始终优先。
 	if strings.EqualFold(strings.TrimSpace(req.Network.Mode), model.NetworkModeDedicated) && strings.TrimSpace(req.Network.Bridge) == "" {
 		req.Network.Bridge = def.DefaultNIC
@@ -303,6 +331,7 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 		ImageID:        req.ImageID,
 		AgentID:        req.AgentID,
 		MaxNATMappings: req.MaxNATMappings,
+		VPCID:          req.VPCID,
 	}
 	if instance.MaxNATMappings < 0 {
 		instance.MaxNATMappings = 0
@@ -517,6 +546,9 @@ func (s *VirtualisService) DeleteInstance(ctx context.Context, id uint) error {
 	// NAT 映射与实例同生死：不删会残留，SQLite 复用 ID 后会被后建实例继承，
 	// 对外展示的 SSH 端口就会指向已不存在的映射。
 	if err := s.db.Where("instance_id = ?", id).Delete(&model.NATMapping{}).Error; err != nil {
+		return err
+	}
+	if err := s.db.Where("instance_id = ?", id).Delete(&model.FirewallRule{}).Error; err != nil {
 		return err
 	}
 	if err := s.db.Delete(&model.Instance{}, id).Error; err != nil {
@@ -1031,6 +1063,7 @@ func toWireInstance(instance *model.Instance, image *model.Image) agentclient.In
 		Network:     instance.Network,
 		Image:       toWireImage(image),
 		NATMappings: toWireMappings(instance.NATMappings),
+		Firewall:    toWireFirewall(instance.FirewallRules),
 	}
 }
 

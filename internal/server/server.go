@@ -70,6 +70,13 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 
 	// Drivers
 	authed.GET("/drivers", h.Drivers)
+	authed.GET("/vpcs", h.VPCs)
+	authed.POST("/vpcs", middleware.RequireAdmin(), h.CreateVPC)
+	authed.DELETE("/vpcs/:id", middleware.RequireAdmin(), h.DeleteVPC)
+	authed.GET("/instances/:id/firewall", h.Firewall)
+	authed.POST("/instances/:id/firewall", middleware.RequireAdmin(), h.CreateFirewall)
+	authed.PATCH("/firewall/:id", middleware.RequireAdmin(), h.UpdateFirewall)
+	authed.DELETE("/firewall/:id", middleware.RequireAdmin(), h.DeleteFirewall)
 
 	// IP pool: free addresses feed the instance-create dialog (agent-scoped);
 	// management endpoints live under /admin below.
@@ -142,6 +149,12 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	v1.GET("/images", h.V1Images)
 	v1.POST("/instances", h.V1CreateInstance)
 	v1.GET("/agents", h.V1Agents)
+	v1.GET("/vpcs", h.VPCs)
+	v1.GET("/ip-pools/:agentID/free", h.FreeIPPoolEntries)
+	v1.GET("/instances/:id/firewall", h.Firewall)
+	v1.POST("/instances/:id/firewall", h.CreateFirewall)
+	v1.PATCH("/firewall/:id", h.UpdateFirewall)
+	v1.DELETE("/firewall/:id", h.DeleteFirewall)
 	v1.GET("/instances", h.Instances)
 	v1.GET("/instances/:id", h.Instance)
 	v1.GET("/instances/:id/status", h.InstanceStatus)

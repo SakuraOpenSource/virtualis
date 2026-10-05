@@ -34,6 +34,7 @@ const (
 	NetworkModeDedicated = "dedicated"
 	// NetworkModeNone 关闭实例网络。
 	NetworkModeNone = "none"
+	NetworkModeVPC  = "vpc"
 )
 
 const (
@@ -92,8 +93,8 @@ func NormalizeNetworkConfig(network NetworkConfig) (NetworkConfig, error) {
 	if network.Mode == "" {
 		network.Mode = NetworkModeNAT
 	}
-	if network.Mode != NetworkModeNAT && network.Mode != NetworkModeDedicated && network.Mode != NetworkModeNone {
-		return network, errors.New("网络模式必须是 nat、dedicated 或 none")
+	if network.Mode != NetworkModeNAT && network.Mode != NetworkModeDedicated && network.Mode != NetworkModeNone && network.Mode != NetworkModeVPC {
+		return network, errors.New("网络模式必须是 nat、dedicated、vpc 或 none")
 	}
 	// Dedicated 下 Bridge 存放挂载目标：主机网桥或物理网卡名。
 	// 留空表示由被控自动选择第一个有地址的物理网卡。
@@ -175,7 +176,10 @@ type Instance struct {
 	AgentID        *uint  `gorm:"index" json:"agent_id"`
 	Agent          *Agent `gorm:"foreignKey:AgentID" json:"agent,omitempty"`
 	// NATMappings 是该实例的 NAT 端口转发清单，由被控在开机时应用。
-	NATMappings []NATMapping `gorm:"foreignKey:InstanceID" json:"nat_mappings,omitempty"`
+	NATMappings   []NATMapping   `gorm:"foreignKey:InstanceID" json:"nat_mappings,omitempty"`
+	VPCID         *uint          `gorm:"index" json:"vpc_id"`
+	VPC           *VPC           `gorm:"foreignKey:VPCID" json:"vpc,omitempty"`
+	FirewallRules []FirewallRule `gorm:"foreignKey:InstanceID" json:"firewall_rules,omitempty"`
 	// SSHPassword 是运行时注入的 root 密码（存 ConfigJSON），只在详情
 	// 接口填充，不落列。
 	SSHPassword string `gorm:"-" json:"ssh_password,omitempty"`

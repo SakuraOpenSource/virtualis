@@ -27,6 +27,32 @@ type NATMapping struct {
 	GuestPort int    `json:"guest_port"`
 }
 
+// FirewallRule 是实例的一条防火墙规则（与 agent 端协议一致）。
+type FirewallRule struct {
+	ID        uint   `json:"id,omitempty"`
+	Direction string `json:"direction"` // in / out
+	Action    string `json:"action"`    // accept / drop
+	Protocol  string `json:"protocol"`  // tcp / udp / icmp / any
+	PortStart int    `json:"port_start,omitempty"`
+	PortEnd   int    `json:"port_end,omitempty"`
+	CIDR      string `json:"cidr,omitempty"`
+	Priority  int    `json:"priority,omitempty"`
+	Enabled   bool   `json:"enabled"`
+	Remark    string `json:"remark,omitempty"`
+}
+
+// NetworkSpec 是 VPC 网络的创建参数（与 agent 端协议一致）。
+type NetworkSpec struct {
+	Name      string   `json:"name"`
+	Driver    string   `json:"driver,omitempty"` // incus / qemu；空 = 自动选择
+	Subnet    string   `json:"subnet"`           // CIDR，如 10.100.0.0/24
+	Gateway   string   `json:"gateway"`
+	DHCPStart string   `json:"dhcp_start,omitempty"`
+	DHCPEnd   string   `json:"dhcp_end,omitempty"`
+	NAT       bool     `json:"nat"`
+	DNS       []string `json:"dns,omitempty"`
+}
+
 type Instance struct {
 	ID          uint                `json:"id"`
 	Name        string              `json:"name"`
@@ -40,6 +66,8 @@ type Instance struct {
 	Image       *Image              `json:"image,omitempty"`
 	// NATMappings 是期望清单，被控开机时应用 DNAT、关机/删除时清除。
 	NATMappings []NATMapping `json:"nat_mappings,omitempty"`
+	// Firewall 是期望清单，被控按优先级对账 iptables 规则。
+	Firewall []FirewallRule `json:"firewall,omitempty"`
 	// RootPassword 只随创建请求下发一次（写盘/初始 chpasswd 用）。
 	RootPassword string `json:"root_password,omitempty"`
 	// SSHReady 是被控回包字段：首次密码注入完成后为 true。
@@ -290,6 +318,46 @@ func (c *Client) ApplyNAT(ctx context.Context, instance Instance) error {
 		return err
 	}
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("instances/%d/nat", instance.ID), bytes.NewReader(raw), "application/json")
+	if err != nil {
+		return err
+	}
+	return c.do(req, nil)
+}
+
+// ApplyFirewall 把实例的期望防火墙规则全量下发给被控对账（运行中即时生效）。
+func (c *Client) ApplyFirewall(ctx context.Context, instance Instance) error {
+	body := map[string]any{"instance": instance, "rules": instance.Firewall}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("instances/%d/firewall", instance.ID), bytes.NewReader(raw), "application/json")
+	if err != nil {
+		return err
+	}
+	return c.do(req, nil)
+}
+
+// CreateNetwork 让被控创建 VPC 虚拟网络。
+func (c *Client) CreateNetwork(ctx context.Context, spec NetworkSpec) error {
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, "vpc", bytes.NewReader(raw), "application/json")
+	if err != nil {
+		return err
+	}
+	return c.do(req, nil)
+}
+
+// DeleteNetwork 让被控删除 VPC 虚拟网络；driver 为空时由被控自动选择。
+func (c *Client) DeleteNetwork(ctx context.Context, name, driver string) error {
+	p := "vpc/" + url.PathEscape(name)
+	if driver != "" {
+		p += "?driver=" + url.QueryEscape(driver)
+	}
+	req, err := c.newRequest(ctx, http.MethodDelete, p, nil, "")
 	if err != nil {
 		return err
 	}
