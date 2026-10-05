@@ -147,6 +147,8 @@ type CreateInstanceRequest struct {
 	AgentID *uint               `json:"agent_id"`
 	// MaxNATMappings 是允许创建的 NAT 映射上限，0 表示不限。
 	MaxNATMappings int `json:"max_nat_mappings"`
+	// IPPoolEntryID 指定独立 IP 模式下从地址池选择的地址；0/空表示手填。
+	IPPoolEntryID *uint `json:"ip_pool_entry_id"`
 	// AutoPassword 为 true（默认）时生成随机 root 密码并存库供管理页查看。
 	AutoPassword *bool `json:"auto_password"`
 }
@@ -209,6 +211,42 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	spec, err = model.NormalizeInstanceSpec(spec)
 	if err != nil {
 		return nil, BadRequest("%s", err.Error())
+	}
+	// 独立 IP 池：从池内选择地址时自动生成网络配置（CIDR/网关/DNS/
+	// 挂载接口）。池默认参数先于站点默认网卡生效，显式填写始终优先。
+	var poolEntry *model.IPPoolEntry
+	if req.IPPoolEntryID != nil && *req.IPPoolEntryID > 0 {
+		if !strings.EqualFold(strings.TrimSpace(req.Network.Mode), model.NetworkModeDedicated) {
+			return nil, BadRequest("IP 池选择仅适用于独立 IP 模式")
+		}
+		entry, pool, poolErr := s.poolEntryForCreate(agent.ID, *req.IPPoolEntryID)
+		if poolErr != nil {
+			return nil, poolErr
+		}
+		poolEntry = entry
+		prefix := entry.Prefix
+		if prefix <= 0 {
+			prefix = pool.Prefix
+		}
+		prefix = normalizePoolPrefix(prefix)
+		if strings.TrimSpace(req.Network.IPv4) == "" {
+			req.Network.IPv4 = fmt.Sprintf("%s/%d", entry.IP, prefix)
+		} else if !sameIPv4(req.Network.IPv4, entry.IP) {
+			return nil, BadRequest("网络配置中的 IPv4 与所选池内地址不一致")
+		}
+		if strings.TrimSpace(req.Network.Gateway) == "" {
+			if entry.Gateway != "" {
+				req.Network.Gateway = entry.Gateway
+			} else {
+				req.Network.Gateway = pool.Gateway
+			}
+		}
+		if len(req.Network.DNS) == 0 && len(pool.DNS) > 0 {
+			req.Network.DNS = append([]string(nil), pool.DNS...)
+		}
+		if strings.TrimSpace(req.Network.Bridge) == "" && pool.Interface != "" {
+			req.Network.Bridge = pool.Interface
+		}
 	}
 	// 默认网卡只作用于 dedicated 模式；NAT 必须继续使用 incusbr0/
 	// virbr0，none 模式不应注入任何挂载目标。显式 bridge 始终优先。
@@ -280,6 +318,13 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	}
 	operationID := newOperationID()
 	appendOperationLog(s.db, instance.ID, operationID, model.OperationCreate, "database", model.OperationSuccess, "实例记录已创建", nil)
+	// 池地址占位：CAS 失败说明并发抢占，回滚刚创建的实例记录。
+	if poolEntry != nil {
+		if err := s.assignPoolEntry(poolEntry.ID, instance.ID); err != nil {
+			_ = s.db.Delete(&model.Instance{}, instance.ID)
+			return nil, err
+		}
+	}
 	// 自动 SSH 映射：NAT 模式且有密码时建一条 TCP 22 转发，不计入上限。
 	if autoPassword && network.Mode == model.NetworkModeNAT {
 		hostPort, portErr := s.allocateNATPort(*req.AgentID)
@@ -474,7 +519,11 @@ func (s *VirtualisService) DeleteInstance(ctx context.Context, id uint) error {
 	if err := s.db.Where("instance_id = ?", id).Delete(&model.NATMapping{}).Error; err != nil {
 		return err
 	}
-	return s.db.Delete(&model.Instance{}, id).Error
+	if err := s.db.Delete(&model.Instance{}, id).Error; err != nil {
+		return err
+	}
+	// 实例消亡后释放它占用的池地址（若有）。
+	return s.ReleaseIPPoolInstance(id)
 }
 
 func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action string) (*model.Instance, error) {

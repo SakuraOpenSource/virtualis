@@ -69,5 +69,7 @@ func AllModels() []any {
 		&Agent{},
 		&NATMapping{},
 		&InstanceOperationLog{},
+		&IPPool{},
+		&IPPoolEntry{},
 	}
 }

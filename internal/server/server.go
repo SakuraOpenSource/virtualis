@@ -71,6 +71,10 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	// Drivers
 	authed.GET("/drivers", h.Drivers)
 
+	// IP pool: free addresses feed the instance-create dialog (agent-scoped);
+	// management endpoints live under /admin below.
+	authed.GET("/ip-pools/:agentID/free", h.FreeIPPoolEntries)
+
 	// Instances
 	authed.GET("/instances", h.Instances)
 	authed.POST("/instances", h.CreateInstance)
@@ -116,6 +120,14 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	admin.POST("/agents", h.CreateAgent)
 	admin.POST("/agents/:id/rotate-token", h.RotateAgentToken)
 	admin.DELETE("/agents/:id", h.DeleteAgent)
+
+	// Dedicated-IP pools: defaults + entries per agent.
+	admin.GET("/ip-pools", h.IPPools)
+	admin.GET("/ip-pools/:agentID", h.IPPool)
+	admin.PUT("/ip-pools/:agentID", h.SaveIPPool)
+	admin.POST("/ip-pools/:agentID/entries", h.AddIPPoolEntries)
+	admin.PATCH("/ip-pool-entries/:id", h.UpdateIPPoolEntry)
+	admin.DELETE("/ip-pool-entries/:id", h.DeleteIPPoolEntry)
 
 	// Agent self-registration (no CSRF, token-based) - must be outside CSRF group
 	agentAPI := eng.Group("/api/agent", middleware.RequireInstalled(rt))
