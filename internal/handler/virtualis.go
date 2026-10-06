@@ -22,7 +22,11 @@ import (
 // Instances returns paginated instances.
 func (h *Handler) Instances(c *gin.Context) {
 	page, pageSize, _ := Pagination(c)
-	items, total, err := h.virtualis().ListInstances(page, pageSize)
+	ownerID := uint(0)
+	if u := httpx.CurrentUser(c); u != nil && !u.IsAdmin() {
+		ownerID = u.ID
+	}
+	items, total, err := h.virtualis().ListInstancesForOwner(page, pageSize, ownerID)
 	if err != nil {
 		respond(c, nil, err)
 		return

@@ -7,6 +7,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/SakuraOpenSource/virtualis/internal/agentclient"
 	"github.com/SakuraOpenSource/virtualis/internal/model"
@@ -153,24 +154,32 @@ func (s *VirtualisService) CreateVPC(ctx context.Context, req VPCInput) (*model.
 	if !agent.IsOnline() {
 		return nil, Conflict("被控节点当前不在线")
 	}
-	var count int64
-	if err := s.db.Model(&model.VPC{}).Where("agent_id = ? AND name = ?", vpc.AgentID, vpc.Name).Count(&count).Error; err != nil {
-		return nil, err
-	}
-	if count > 0 {
-		return nil, Conflict("该节点已有同名 VPC")
-	}
 	client, err := s.agentClient(agent)
 	if err != nil {
 		return nil, err
 	}
-	if err := client.CreateNetwork(ctx, agentclient.NetworkSpec{Name: vpc.Name, Driver: vpc.Driver, Subnet: vpc.Subnet, Gateway: vpc.Gateway, DHCPStart: vpc.DHCPStart, DHCPEnd: vpc.DHCPEnd, NAT: vpc.NAT, DNS: vpc.DNS}); err != nil {
-		return nil, agentFailure(err)
+	// Reserve the unique name before touching the Agent. A concurrent creator
+	// must not compensate by deleting the first request's live network.
+	vpc.State = "creating"
+	if err = s.db.WithContext(ctx).Create(vpc).Error; err != nil {
+		return nil, Conflict("VPC name unavailable: %s", err)
 	}
-	if err := s.db.Create(vpc).Error; err != nil {
-		_ = client.DeleteNetwork(ctx, vpc.Name, vpc.Driver)
-		return nil, err
+	if err = client.CreateNetwork(ctx, agentclient.NetworkSpec{Name: vpc.Name, Driver: vpc.Driver, Subnet: vpc.Subnet, Gateway: vpc.Gateway, DHCPStart: vpc.DHCPStart, DHCPEnd: vpc.DHCPEnd, NAT: vpc.NAT, DNS: vpc.DNS}); err != nil {
+		// A network may have been created before a transport failure. Keep its
+		// durable ownership record, unavailable for references, for admin retry.
+		persistErr := s.db.Model(vpc).Updates(map[string]any{"state": "error", "error": err.Error()}).Error
+		return nil, errors.Join(agentFailure(err), persistErr)
 	}
+	if err = s.db.WithContext(ctx).Model(vpc).Update("state", "available").Error; err != nil {
+		compensationCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		cleanupErr := client.DeleteNetwork(compensationCtx, vpc.Name, vpc.Driver)
+		if cleanupErr != nil {
+			return nil, errors.Join(err, cleanupErr, s.db.Model(vpc).Updates(map[string]any{"state": "error", "error": cleanupErr.Error()}).Error)
+		}
+		return nil, errors.Join(err, s.db.Delete(vpc).Error)
+	}
+	vpc.State = "available"
 	return vpc, nil
 }
 
@@ -178,13 +187,6 @@ func (s *VirtualisService) DeleteVPC(ctx context.Context, id uint) error {
 	vpc, err := s.GetVPC(id)
 	if err != nil {
 		return err
-	}
-	var count int64
-	if err := s.db.Model(&model.Instance{}).Where("vpc_id = ?", id).Count(&count).Error; err != nil {
-		return err
-	}
-	if count > 0 {
-		return Conflict("VPC 仍有实例引用，请先迁出或彻底删除")
 	}
 	agent, err := NewAgentService(s.db).Get(vpc.AgentID)
 	if err != nil {
@@ -194,8 +196,39 @@ func (s *VirtualisService) DeleteVPC(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
-	if err := client.DeleteNetwork(ctx, vpc.Name, vpc.Driver); err != nil {
-		return agentFailure(err)
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// This same row is locked by reference insertion; a delete and a new
+		// instance/migration cannot pass their validations concurrently.
+		res := tx.Model(&model.VPC{}).Where("id = ? AND state IN ?", id, []string{"available", "error"}).Update("state", "deleting")
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return Conflict("VPC busy")
+		}
+		var count int64
+		if e := tx.Model(&model.Instance{}).Where("vpc_id = ?", id).Count(&count).Error; e != nil {
+			return e
+		}
+		if count > 0 {
+			return Conflict("VPC 仍有实例引用，请先迁出或彻底删除")
+		}
+		if e := tx.Model(&model.Migration{}).Where("target_vpc_id = ? AND stage NOT IN ?", id, []string{"completed", "failed"}).Count(&count).Error; e != nil {
+			return e
+		}
+		if count > 0 {
+			return Conflict("VPC reserved by migration")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-	return s.db.Delete(vpc).Error
+	if err = client.DeleteNetwork(ctx, vpc.Name, vpc.Driver); err != nil {
+		return errors.Join(agentFailure(err), s.db.Model(vpc).Updates(map[string]any{"state": "error", "error": err.Error()}).Error)
+	}
+	if err = s.db.Delete(vpc).Error; err != nil {
+		return errors.Join(err, s.db.Model(vpc).Updates(map[string]any{"state": "error", "error": "remote deleted; retry database cleanup"}).Error)
+	}
+	return nil
 }

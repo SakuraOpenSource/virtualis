@@ -54,6 +54,7 @@ type NetworkSpec struct {
 }
 
 type Instance struct {
+	ObservedIP  string              `json:"observed_ip,omitempty"`
 	ID          uint                `json:"id"`
 	Name        string              `json:"name"`
 	DisplayName string              `json:"display_name,omitempty"`

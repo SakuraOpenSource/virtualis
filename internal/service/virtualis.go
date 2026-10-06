@@ -34,8 +34,10 @@ type VirtualisService struct {
 
 	// vncTickets 是一次性 VNC 短票：key 为随机凭证，value 绑定实例与过期时间。
 	// 只活在内存里，主控重启即失效，调用方（Levis 插件）须重新领取。
-	vncMu      sync.Mutex
-	vncTickets map[string]vncTicket
+	opMu             sync.Mutex
+	activeOperations map[uint]bool
+	vncMu            sync.Mutex
+	vncTickets       map[string]vncTicket
 }
 
 type vncTicket struct {
@@ -103,6 +105,9 @@ func unavailableDrivers(reason string) []DriverStatus {
 
 // ListInstances returns paginated instances.
 func (s *VirtualisService) ListInstances(page, pageSize int) ([]model.Instance, int64, error) {
+	return s.ListInstancesForOwner(page, pageSize, 0)
+}
+func (s *VirtualisService) ListInstancesForOwner(page, pageSize int, ownerID uint) ([]model.Instance, int64, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -112,13 +117,17 @@ func (s *VirtualisService) ListInstances(page, pageSize int) ([]model.Instance, 
 	if pageSize > 100 {
 		pageSize = 100
 	}
+	query := s.db.Model(&model.Instance{}).Where("trashed_at IS NULL")
+	if ownerID != 0 {
+		query = query.Where("owner_id = ?", ownerID)
+	}
 	var total int64
-	if err := s.db.Model(&model.Instance{}).Count(&total).Error; err != nil {
+	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var items []model.Instance
 	offset := (page - 1) * pageSize
-	if err := s.db.Preload("Image").Preload("Agent").Order("id DESC").Offset(offset).Limit(pageSize).Find(&items).Error; err != nil {
+	if err := query.Preload("Image").Preload("Agent").Order("id DESC").Offset(offset).Limit(pageSize).Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 	return items, total, nil
@@ -126,8 +135,16 @@ func (s *VirtualisService) ListInstances(page, pageSize int) ([]model.Instance, 
 
 // GetInstance returns instance by id.
 func (s *VirtualisService) GetInstance(id uint) (*model.Instance, error) {
+	inst, err := s.GetAnyInstance(id)
+	if err == nil && inst.TrashedAt != nil {
+		return nil, NotFound("instance is in recycle bin")
+	}
+	return inst, err
+}
+
+func (s *VirtualisService) GetAnyInstance(id uint) (*model.Instance, error) {
 	var inst model.Instance
-	if err := s.db.Preload("Image").Preload("Agent").Preload("NATMappings").Preload("VPC").Preload("FirewallRules", func(db *gorm.DB) *gorm.DB { return db.Order("priority ASC, id ASC") }).First(&inst, id).Error; err != nil {
+	if err := s.db.Preload("Image").Preload("Agent").Preload("NATMappings", "reservation_operation = ''").Preload("VPC").Preload("FirewallRules", func(db *gorm.DB) *gorm.DB { return db.Order("priority ASC, id ASC") }).First(&inst, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, NotFound("instance not found")
 		}
@@ -155,7 +172,7 @@ type CreateInstanceRequest struct {
 }
 
 // CreateInstance records an instance and provisions it on the selected agent.
-func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanceRequest) (*model.Instance, error) {
+func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanceRequest) (result *model.Instance, err error) {
 	if err := ValidateInstanceName(req.Name); err != nil {
 		return nil, err
 	}
@@ -342,18 +359,32 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if autoPassword {
 		instance.StoreSSHPassword(GeneratePassword(16))
 	}
-	if err := s.db.Create(instance).Error; err != nil {
+	operationID := newOperationID()
+	now := time.Now().UTC()
+	instance.BusyOperation = operationID
+	instance.BusyAction = "create"
+	instance.BusySince = &now
+	if err = s.db.Transaction(func(tx *gorm.DB) error {
+		if instance.VPCID != nil {
+			if e := reserveVPCReference(tx, *instance.VPCID); e != nil {
+				return e
+			}
+		}
+		if e := tx.Create(instance).Error; e != nil {
+			return e
+		}
+		if poolEntry != nil {
+			return NewVirtualisService(tx).assignPoolEntry(poolEntry.ID, instance.ID)
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	operationID := newOperationID()
+	guard := &operationGuard{s: s, id: instance.ID, token: operationID, action: "create"}
+	defer guard.finishInstance(&err, &result)
 	appendOperationLog(s.db, instance.ID, operationID, model.OperationCreate, "database", model.OperationSuccess, "实例记录已创建", nil)
 	// 池地址占位：CAS 失败说明并发抢占，回滚刚创建的实例记录。
-	if poolEntry != nil {
-		if err := s.assignPoolEntry(poolEntry.ID, instance.ID); err != nil {
-			_ = s.db.Delete(&model.Instance{}, instance.ID)
-			return nil, err
-		}
-	}
+
 	// 自动 SSH 映射：NAT 模式且有密码时建一条 TCP 22 转发，不计入上限。
 	if autoPassword && network.Mode == model.NetworkModeNAT {
 		hostPort, portErr := s.allocateNATPort(*req.AgentID)
@@ -413,7 +444,7 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 		return nil, mErr
 	}
 	if err := s.db.Model(instance).Updates(map[string]any{
-		"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network),
+		"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": instanceDisplayIP(instance), "observed_ip": instance.ObservedIP,
 	}).Error; err != nil {
 		return nil, err
 	}
@@ -526,40 +557,13 @@ func capabilityAvailable(items []agentclient.Driver, name string) bool {
 	return false
 }
 
-// DeleteInstance asks the assigned agent to remove the runtime before deleting
-// the master record. Legacy records without an agent are only removed from DB.
-func (s *VirtualisService) DeleteInstance(ctx context.Context, id uint) error {
-	instance, err := s.GetInstance(id)
+func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action string) (result *model.Instance, err error) {
+	guard, err := s.beginOperation(ctx, id, model.OperationPower)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if instance.AgentID != nil && instance.Agent != nil {
-		client, clientErr := s.agentClient(instance.Agent)
-		if clientErr != nil {
-			return clientErr
-		}
-		if err := client.DeleteInstance(ctx, toWireInstance(instance, instance.Image)); err != nil {
-			return agentFailure(err)
-		}
-	}
-	appendOperationLog(s.db, id, newOperationID(), model.OperationDelete, "complete", model.OperationSuccess, "实例已删除", nil)
-	// NAT 映射与实例同生死：不删会残留，SQLite 复用 ID 后会被后建实例继承，
-	// 对外展示的 SSH 端口就会指向已不存在的映射。
-	if err := s.db.Where("instance_id = ?", id).Delete(&model.NATMapping{}).Error; err != nil {
-		return err
-	}
-	if err := s.db.Where("instance_id = ?", id).Delete(&model.FirewallRule{}).Error; err != nil {
-		return err
-	}
-	if err := s.db.Delete(&model.Instance{}, id).Error; err != nil {
-		return err
-	}
-	// 实例消亡后释放它占用的池地址（若有）。
-	return s.ReleaseIPPoolInstance(id)
-}
-
-func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action string) (*model.Instance, error) {
-	operationID := newOperationID()
+	defer guard.finish(&err)
+	operationID := guard.token
 	appendOperationLog(s.db, id, operationID, model.OperationPower, "start", model.OperationRunning, "开始执行 "+action, nil)
 	if !model.ValidAction(action) {
 		return nil, BadRequest("invalid action %q", action)
@@ -616,7 +620,7 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	if mErr != nil {
 		return nil, mErr
 	}
-	updates := map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network)}
+	updates := map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": instanceDisplayIP(instance), "observed_ip": instance.ObservedIP}
 	// 重装等于换了个全新 guest：旧的 SSH 就绪状态作废，等后台注入完成后
 	// 由 watchSSHReady 重新置 true。
 	if action == model.ActionReinstall {
@@ -632,7 +636,12 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	return s.GetInstance(instance.ID)
 }
 
-func (s *VirtualisService) RefreshStatus(ctx context.Context, id uint) (*model.Instance, error) {
+func (s *VirtualisService) RefreshStatus(ctx context.Context, id uint) (result *model.Instance, err error) {
+	guard, err := s.beginOperation(ctx, id, "status")
+	if err != nil {
+		return nil, err
+	}
+	defer guard.finishInstance(&err, &result)
 	instance, err := s.GetInstance(id)
 	if err != nil {
 		return nil, err
@@ -657,7 +666,7 @@ func (s *VirtualisService) RefreshStatus(ctx context.Context, id uint) (*model.I
 	if mErr != nil {
 		return nil, mErr
 	}
-	updates := map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": primaryConfiguredIP(instance.Network)}
+	updates := map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": instanceDisplayIP(instance), "observed_ip": instance.ObservedIP}
 	// 被控的首次密码注入是异步的：状态轮询顺带把 ssh_ready 回写为 true，
 	// 只允许 false→true，配置网络失败路径负责置回 false。
 	if remote.SSHReady && !instance.SSHReady {
@@ -689,7 +698,12 @@ func (s *VirtualisService) InstanceMetrics(ctx context.Context, id uint) (agentc
 	return metrics, nil
 }
 
-func (s *VirtualisService) InstanceNetwork(ctx context.Context, id uint) (agentclient.NetworkStatus, error) {
+func (s *VirtualisService) InstanceNetwork(ctx context.Context, id uint) (result agentclient.NetworkStatus, err error) {
+	guard, err := s.beginOperation(ctx, id, "network_status")
+	if err != nil {
+		return result, err
+	}
+	defer guard.finish(&err)
 	instance, err := s.GetInstance(id)
 	if err != nil {
 		return agentclient.NetworkStatus{}, err
@@ -1059,6 +1073,7 @@ func toWireInstance(instance *model.Instance, image *model.Image) agentclient.In
 		Type:        instance.Type,
 		Status:      instance.Status,
 		ImageID:     instance.ImageID,
+		ObservedIP:  instance.ObservedIP,
 		Spec:        instance.Spec,
 		Network:     instance.Network,
 		Image:       toWireImage(image),
@@ -1086,6 +1101,10 @@ func toWireMappings(items []model.NATMapping) []agentclient.NATMapping {
 // 实例的陈旧记录永远得不到纠正；被控未上报时保留主控已有值。独立 IP 模式
 // 的字段是用户声明，仍只在为空时填充。
 func mergeRemoteNetwork(instance *model.Instance, remote agentclient.Instance) {
+	instance.ObservedIP = validObservedIPv4(remote.ObservedIP)
+	if instance.ObservedIP != "" {
+		instance.IP = instance.ObservedIP
+	}
 	if instance.Network.Mode != model.NetworkModeNAT {
 		return
 	}
@@ -1120,8 +1139,13 @@ func primaryConfiguredIP(network model.NetworkConfig) string {
 
 // ConfigureInstanceNetwork validates/persists the desired network and asks the
 // agent to synchronously re-run IPv4, SSH and NAT reconciliation.
-func (s *VirtualisService) ConfigureInstanceNetwork(ctx context.Context, id uint, desired model.NetworkConfig) (*model.Instance, string, error) {
-	operationID := newOperationID()
+func (s *VirtualisService) ConfigureInstanceNetwork(ctx context.Context, id uint, desired model.NetworkConfig) (result *model.Instance, operationID string, err error) {
+	guard, err := s.beginOperation(ctx, id, "configure_network")
+	if err != nil {
+		return nil, "", err
+	}
+	defer guard.finishInstance(&err, &result)
+	operationID = guard.token
 	appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "start", model.OperationRunning, "开始配置实例网络", nil)
 	instance, err := s.GetInstance(id)
 	if err != nil {
@@ -1205,7 +1229,7 @@ func (s *VirtualisService) ConfigureInstanceNetwork(ctx context.Context, id uint
 		return nil, operationID, err
 	}
 	appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "complete", model.OperationSuccess, fmt.Sprintf("网络配置完成，IPv4 %s", instance.IP), nil)
-	result, err := s.GetInstance(id)
+	result, err = s.GetInstance(id)
 	return result, operationID, err
 }
 
@@ -1254,7 +1278,12 @@ type CreateNATMappingRequest struct {
 }
 
 // CreateNATMapping 为实例添加 NAT 端口转发；实例运行中时即时下发被控。
-func (s *VirtualisService) CreateNATMapping(ctx context.Context, instanceID uint, req CreateNATMappingRequest) (*model.NATMapping, error) {
+func (s *VirtualisService) CreateNATMapping(ctx context.Context, instanceID uint, req CreateNATMappingRequest) (result *model.NATMapping, err error) {
+	guard, err := s.beginOperation(ctx, instanceID, "nat_create")
+	if err != nil {
+		return nil, err
+	}
+	defer guard.finish(&err)
 	instance, err := s.GetInstance(instanceID)
 	if err != nil {
 		return nil, err
@@ -1313,12 +1342,16 @@ func (s *VirtualisService) CreateNATMapping(ctx context.Context, instanceID uint
 	}
 	// 预载清单还是旧值，先补上新映射再下发。
 	instance.NATMappings = append(instance.NATMappings, mapping)
-	s.syncNATIfRunning(ctx, instance)
-	return &mapping, nil
+	return &mapping, s.syncNATIfRunning(ctx, instance)
 }
 
 // DeleteNATMapping 删除 NAT 映射；运行中的实例即时撤销对应规则。
-func (s *VirtualisService) DeleteNATMapping(ctx context.Context, instanceID, mappingID uint) error {
+func (s *VirtualisService) DeleteNATMapping(ctx context.Context, instanceID, mappingID uint) (err error) {
+	guard, err := s.beginOperation(ctx, instanceID, "nat_delete")
+	if err != nil {
+		return err
+	}
+	defer guard.finish(&err)
 	instance, err := s.GetInstance(instanceID)
 	if err != nil {
 		return err
@@ -1337,26 +1370,33 @@ func (s *VirtualisService) DeleteNATMapping(ctx context.Context, instanceID, map
 		}
 	}
 	instance.NATMappings = kept
-	s.syncNATIfRunning(ctx, instance)
-	return nil
+	return s.syncNATIfRunning(ctx, instance)
 }
 
 // syncNATIfRunning 把最新的映射清单推给被控；实例未运行时被控侧没有
 // 规则可对账，直接跳过。
-func (s *VirtualisService) syncNATIfRunning(ctx context.Context, instance *model.Instance) {
+func (s *VirtualisService) syncNATIfRunning(ctx context.Context, instance *model.Instance) error {
 	if instance.Status != model.InstanceStatusRunning || instance.Agent == nil {
-		return
+		return nil
 	}
 	client, err := s.agentClient(instance.Agent)
 	if err != nil {
-		return
+		return err
 	}
-	_ = client.ApplyNAT(ctx, toWireInstance(instance, instance.Image))
+	if err = client.ApplyNAT(ctx, toWireInstance(instance, instance.Image)); err != nil {
+		return Conflict("NAT desired state saved but Agent sync failed: %s", err)
+	}
+	return nil
 }
 
 // SetInstancePassword 设置实例的 root 密码并落库；实例运行中时异步推给
 // 被控注入（QEMU 依赖 guest agent，注入可能滞后于本调用返回）。
-func (s *VirtualisService) SetInstancePassword(ctx context.Context, instanceID uint, password string) (*model.Instance, error) {
+func (s *VirtualisService) SetInstancePassword(ctx context.Context, instanceID uint, password string) (result *model.Instance, err error) {
+	guard, err := s.beginOperation(ctx, instanceID, "password")
+	if err != nil {
+		return nil, err
+	}
+	defer guard.finishInstance(&err, &result)
 	password = strings.TrimSpace(password)
 	if utf8.RuneCountInString(password) < 6 || utf8.RuneCountInString(password) > 64 {
 		return nil, BadRequest("密码长度需在 6-64 个字符之间")

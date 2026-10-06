@@ -86,7 +86,12 @@ func (s *VirtualisService) ListFirewall(instanceID uint) ([]model.FirewallRule, 
 	return inst.FirewallRules, nil
 }
 
-func (s *VirtualisService) CreateFirewall(ctx context.Context, instanceID uint, req FirewallInput) (*model.FirewallRule, error) {
+func (s *VirtualisService) CreateFirewall(ctx context.Context, instanceID uint, req FirewallInput) (result *model.FirewallRule, err error) {
+	guard, err := s.beginOperation(ctx, instanceID, "firewall_create")
+	if err != nil {
+		return nil, err
+	}
+	defer guard.finish(&err)
 	inst, err := s.GetInstance(instanceID)
 	if err != nil {
 		return nil, err
@@ -105,7 +110,7 @@ func (s *VirtualisService) CreateFirewall(ctx context.Context, instanceID uint, 
 	return &rule, s.syncFirewallIfRunning(ctx, instanceID)
 }
 
-func (s *VirtualisService) UpdateFirewall(ctx context.Context, id uint, req FirewallInput) (*model.FirewallRule, error) {
+func (s *VirtualisService) UpdateFirewall(ctx context.Context, id uint, req FirewallInput) (result *model.FirewallRule, err error) {
 	var old model.FirewallRule
 	if err := s.db.First(&old, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -113,6 +118,11 @@ func (s *VirtualisService) UpdateFirewall(ctx context.Context, id uint, req Fire
 		}
 		return nil, err
 	}
+	guard, err := s.beginOperation(ctx, old.InstanceID, "firewall_update")
+	if err != nil {
+		return nil, err
+	}
+	defer guard.finish(&err)
 	if _, err := s.GetInstance(old.InstanceID); err != nil {
 		return nil, err
 	}
@@ -127,7 +137,7 @@ func (s *VirtualisService) UpdateFirewall(ctx context.Context, id uint, req Fire
 	return &rule, s.syncFirewallIfRunning(ctx, rule.InstanceID)
 }
 
-func (s *VirtualisService) DeleteFirewall(ctx context.Context, id uint) error {
+func (s *VirtualisService) DeleteFirewall(ctx context.Context, id uint) (err error) {
 	var rule model.FirewallRule
 	if err := s.db.First(&rule, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -135,6 +145,11 @@ func (s *VirtualisService) DeleteFirewall(ctx context.Context, id uint) error {
 		}
 		return err
 	}
+	guard, err := s.beginOperation(ctx, rule.InstanceID, "firewall_delete")
+	if err != nil {
+		return err
+	}
+	defer guard.finish(&err)
 	if _, err := s.GetInstance(rule.InstanceID); err != nil {
 		return err
 	}

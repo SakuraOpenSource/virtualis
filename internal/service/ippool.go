@@ -372,6 +372,20 @@ func (s *VirtualisService) UpdateIPPoolEntry(id uint, in UpdateIPPoolEntryInput)
 		}
 		return nil, err
 	}
+	oldStatus := entry.Status
+	oldOwner := entry.InstanceID
+	if oldOwner != nil && (in.Status != nil || in.Gateway != nil || in.Prefix != nil) {
+		var owners int64
+		if err := s.db.Model(&model.Instance{}).Where("id = ?", *oldOwner).Count(&owners).Error; err != nil {
+			return nil, err
+		}
+		if owners > 0 {
+			return nil, Conflict("owned addresses can only be released by permanent deletion or migration")
+		}
+		if in.Gateway != nil || in.Prefix != nil || in.Status == nil || *in.Status != model.IPPoolStatusFree {
+			return nil, Conflict("release orphan ownership before editing")
+		}
+	}
 	if in.Note != nil {
 		note := strings.TrimSpace(*in.Note)
 		if len(note) > 255 {
@@ -416,8 +430,18 @@ func (s *VirtualisService) UpdateIPPoolEntry(id uint, in UpdateIPPoolEntryInput)
 			entry.Status = model.IPPoolStatusDisabled
 		}
 	}
-	if err := s.db.Save(&entry).Error; err != nil {
-		return nil, err
+	query := s.db.Model(&model.IPPoolEntry{}).Where("id = ? AND status = ?", id, oldStatus)
+	if oldOwner == nil {
+		query = query.Where("instance_id IS NULL")
+	} else {
+		query = query.Where("instance_id = ?", *oldOwner)
+	}
+	res := query.Updates(map[string]any{"status": entry.Status, "instance_id": entry.InstanceID, "assigned_at": entry.AssignedAt, "note": entry.Note, "gateway": entry.Gateway, "prefix": entry.Prefix})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected != 1 {
+		return nil, Conflict("pool ownership changed; refresh before editing")
 	}
 	return &entry, nil
 }
@@ -434,7 +458,14 @@ func (s *VirtualisService) DeleteIPPoolEntry(id uint) error {
 	if entry.Status == model.IPPoolStatusAssigned {
 		return Conflict("地址已分配给实例，请先释放再删除")
 	}
-	return s.db.Delete(&model.IPPoolEntry{}, id).Error
+	res := s.db.Where("id = ? AND status <> ? AND instance_id IS NULL", id, model.IPPoolStatusAssigned).Delete(&model.IPPoolEntry{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return Conflict("address ownership changed")
+	}
+	return nil
 }
 
 // FreeIPPoolEntries 返回被控节点当前可用的地址（展开完有效网络参数）。
