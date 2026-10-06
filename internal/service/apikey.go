@@ -166,8 +166,13 @@ func (s *APIKeyService) Authenticate(secret string) (*model.APIKey, error) {
 	if !key.Usable(time.Now().UTC()) {
 		return nil, Unauthorized("api key revoked or expired")
 	}
-	if len(key.Scopes) != len(model.AllScopes()) {
-		return nil, Unauthorized("invalid site api key")
+	if len(key.Scopes) == 0 {
+		return nil, Unauthorized("invalid api key scopes")
+	}
+	for _, scope := range key.Scopes {
+		if !model.ValidScope(scope) {
+			return nil, Unauthorized("invalid api key scopes")
+		}
 	}
 	return &key, nil
 }

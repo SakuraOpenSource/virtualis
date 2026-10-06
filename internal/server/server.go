@@ -56,7 +56,7 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	authGroup.POST("/logout", middleware.RequireAuth(rt), h.Logout)
 
 	// Authenticated routes.
-	authed := secured.Group("", middleware.RequireAuth(rt))
+	authed := secured.Group("", middleware.RequireAuth(rt), middleware.InstanceOwnership(rt))
 
 	authed.GET("/me", h.Me)
 	authed.PATCH("/me/email", h.UpdateEmail)
@@ -84,7 +84,7 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 
 	// Instances
 	authed.GET("/instances", h.Instances)
-	authed.POST("/instances", h.CreateInstance)
+	authed.POST("/instances", middleware.RequireAdmin(), h.CreateInstance)
 	authed.GET("/instances/:id", h.Instance)
 	authed.DELETE("/instances/:id", h.DeleteInstance)
 	authed.POST("/instances/:id/power", h.InstancePower)
@@ -93,6 +93,7 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	authed.GET("/instances/:id/network", h.InstanceNetwork)
 	authed.POST("/instances/:id/network/configure", h.InstanceConfigureNetwork)
 	authed.GET("/instances/:id/logs", h.InstanceOperationLogs)
+	registerRecoveryRoutes(authed, h, true)
 	authed.POST("/instances/:id/nat", h.InstanceNATCreate)
 	authed.DELETE("/instances/:id/nat/:mid", h.InstanceNATDelete)
 	authed.POST("/instances/:id/password", h.InstancePasswordSet)
@@ -120,6 +121,8 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	admin.PUT("/settings", h.UpdateSettings)
 	admin.GET("/settings/virtualis", h.VirtualisSettings)
 	admin.PUT("/settings/virtualis", h.UpdateVirtualisSettings)
+	admin.GET("/settings/retention", h.Retention)
+	admin.PUT("/settings/retention", h.SaveRetention)
 	admin.GET("/settings/captcha", h.CaptchaSettings)
 	admin.PUT("/settings/captcha", h.UpdateCaptchaSettings)
 	admin.GET("/agents", h.Agents)
@@ -145,7 +148,7 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 
 	// Machine-to-machine open API: site API key auth instead of session
 	// cookies, so it also lives outside the CSRF group.
-	v1 := eng.Group("/api/v1", middleware.RequireInstalled(rt), middleware.RequireAPIKey(rt))
+	v1 := eng.Group("/api/v1", middleware.RequireInstalled(rt), middleware.RequireAPIKey(rt), middleware.APIRequestScope(), middleware.InstanceOwnership(rt))
 	v1.GET("/images", h.V1Images)
 	v1.POST("/instances", h.V1CreateInstance)
 	v1.GET("/agents", h.V1Agents)
@@ -163,6 +166,8 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	v1.GET("/instances/:id/access", h.V1InstanceAccess)
 	v1.DELETE("/instances/:id", h.DeleteInstance)
 	v1.POST("/instances/:id/power", h.InstancePower)
+	registerRecoveryRoutes(v1, h, false)
+	v1.GET("/instances/:id/logs", h.InstanceOperationLogs)
 	// NAT 端口映射：会话版在 /api/instances/:id/nat，v1 路径树不同不会撞注册。
 	v1.GET("/instances/:id/nat", h.V1ListNATMappings)
 	v1.POST("/instances/:id/nat", h.V1CreateNATMapping)

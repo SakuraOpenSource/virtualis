@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"context"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -22,24 +25,35 @@ type Handler struct {
 	storage      *storage.Store
 	// virtualis 是跨请求单例：VNC 短票存内存 map，若每次请求新建服务，
 	// 签发的票在下一次请求里永远查不到（生产 401 根因）。
-	virtSvc *service.VirtualisService
+	virtSvc   *service.VirtualisService
+	virtMu    sync.Mutex
+	virtDB    *gorm.DB
+	cancel    context.CancelFunc
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // New creates a Handler backed by rt.
 func New(rt *runtime.Runtime) *Handler {
-	return &Handler{
+	h := &Handler{
 		rt:           rt,
 		install:      service.NewInstallService(rt),
 		captchaStore: captcha.NewStore(),
 		storage:      storage.New(rt.DataDir()),
 		virtSvc:      service.NewVirtualisService(rt.DB(), storage.New(rt.DataDir())),
+		virtDB:       rt.DB(),
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	h.done = make(chan struct{})
+	go h.trashScheduler(ctx)
+	return h
 }
 
 // Close releases background resources held by the handler.
 // Currently storage and captcha store need no cleanup, but the method
 // is kept for symmetry with server lifecycle.
-func (h *Handler) Close() {}
+func (h *Handler) Close() { h.closeOnce.Do(func() { h.cancel(); <-h.done }) }
 
 func (h *Handler) db() *gorm.DB { return h.rt.DB() }
 
@@ -54,7 +68,40 @@ func (h *Handler) captchaSvc() *service.CaptchaService {
 func (h *Handler) apiKeys() *service.APIKeyService { return service.NewAPIKeyService(h.db()) }
 
 func (h *Handler) virtualis() *service.VirtualisService {
+	h.virtMu.Lock()
+	defer h.virtMu.Unlock()
+	db := h.rt.DB()
+	if db != h.virtDB {
+		h.virtSvc = service.NewVirtualisService(db, h.storage)
+		h.virtDB = db
+	}
 	return h.virtSvc
+}
+
+func (h *Handler) cleanupTrash(ctx context.Context) error {
+	if !h.rt.Installed() {
+		return nil
+	}
+	result, err := h.virtualis().CleanupTrash(ctx, time.Now().UTC(), 100)
+	for _, entry := range result.Failed {
+		log.Printf("trash purge %d failed: %s", entry.ID, entry.Reason)
+	}
+	return err
+}
+func (h *Handler) trashScheduler(ctx context.Context) {
+	defer close(h.done)
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := h.cleanupTrash(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("trash scheduler: %v", err)
+			}
+		}
+	}
 }
 
 func (h *Handler) agents() *service.AgentService { return service.NewAgentService(h.db()) }
