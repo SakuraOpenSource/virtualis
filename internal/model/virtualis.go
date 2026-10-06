@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
 const (
@@ -153,16 +154,24 @@ func NormalizeNetworkConfig(network NetworkConfig) (NetworkConfig, error) {
 
 type Instance struct {
 	Base
-	Name        string        `gorm:"uniqueIndex;size:64;not null" json:"name"`
-	DisplayName string        `gorm:"size:128" json:"display_name"`
-	Driver      string        `gorm:"size:16;not null;default:auto" json:"driver"`
-	Type        string        `gorm:"size:16;not null;default:container" json:"type"`
-	Status      string        `gorm:"size:16;not null;default:pending" json:"status"`
-	ImageID     *uint         `gorm:"index" json:"image_id"`
-	ImageName   string        `gorm:"size:128" json:"image_name"`
-	Spec        InstanceSpec  `gorm:"type:text;serializer:json" json:"spec"`
-	Network     NetworkConfig `gorm:"type:text;serializer:json" json:"network"`
-	IP          string        `gorm:"size:64" json:"ip"`
+	// Explicit lifecycle timestamps, not gorm.DeletedAt: references must include
+	// recycled instances, and Base has no implicit soft-delete behavior.
+	TrashedAt     *time.Time    `gorm:"index" json:"trashed_at"`
+	PurgeAfter    *time.Time    `gorm:"index" json:"purge_after"`
+	BusyOperation string        `gorm:"size:64;not null;default:''" json:"busy_operation,omitempty"`
+	BusyAction    string        `gorm:"size:32" json:"busy_action,omitempty"`
+	BusySince     *time.Time    `json:"busy_since,omitempty"`
+	RecoveryError string        `gorm:"type:text" json:"recovery_error,omitempty"`
+	Name          string        `gorm:"uniqueIndex;size:64;not null" json:"name"`
+	DisplayName   string        `gorm:"size:128" json:"display_name"`
+	Driver        string        `gorm:"size:16;not null;default:auto" json:"driver"`
+	Type          string        `gorm:"size:16;not null;default:container" json:"type"`
+	Status        string        `gorm:"size:16;not null;default:pending" json:"status"`
+	ImageID       *uint         `gorm:"index" json:"image_id"`
+	ImageName     string        `gorm:"size:128" json:"image_name"`
+	Spec          InstanceSpec  `gorm:"type:text;serializer:json" json:"spec"`
+	Network       NetworkConfig `gorm:"type:text;serializer:json" json:"network"`
+	IP            string        `gorm:"size:64" json:"ip"`
 	// ObservedIP 是被控从运行时网卡读取到的 IPv4；Network.IPv4 是期望配置。
 	ObservedIP   string `gorm:"size:64" json:"observed_ip"`
 	SSHReady     bool   `gorm:"not null;default:false" json:"ssh_ready"`
@@ -188,12 +197,13 @@ type Instance struct {
 // NATMapping 是实例的一条 NAT 端口转发：被控主机 HostPort → 实例 GuestPort。
 type NATMapping struct {
 	Base
-	InstanceID uint   `gorm:"index;not null" json:"instance_id"`
-	AgentID    uint   `gorm:"index" json:"agent_id"`
-	Protocol   string `gorm:"size:8;not null;default:tcp" json:"protocol"`
-	HostPort   int    `gorm:"not null" json:"host_port"`
-	GuestPort  int    `gorm:"not null" json:"guest_port"`
-	Remark     string `gorm:"size:64" json:"remark"`
+	InstanceID           uint   `gorm:"index;not null" json:"instance_id"`
+	AgentID              uint   `gorm:"index;uniqueIndex:idx_nat_owner,priority:1" json:"agent_id"`
+	Protocol             string `gorm:"size:8;not null;default:tcp;uniqueIndex:idx_nat_owner,priority:2" json:"protocol"`
+	HostPort             int    `gorm:"not null;uniqueIndex:idx_nat_owner,priority:3" json:"host_port"`
+	ReservationOperation string `gorm:"size:64;not null;default:'';index" json:"-"`
+	GuestPort            int    `gorm:"not null" json:"guest_port"`
+	Remark               string `gorm:"size:64" json:"remark"`
 	// Auto 标记自动创建的映射（如 SSH 端口），前端据此展示。
 	Auto bool `gorm:"not null;default:false" json:"auto"`
 }

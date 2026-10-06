@@ -73,5 +73,8 @@ func AllModels() []any {
 		&IPPoolEntry{},
 		&VPC{},
 		&FirewallRule{},
+		&Snapshot{},
+		&Backup{},
+		&Migration{},
 	}
 }

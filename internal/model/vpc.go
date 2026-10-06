@@ -1,6 +1,8 @@
 package model
 
 type VPC struct {
+	State string `gorm:"size:16;not null;default:available;index" json:"state"`
+	Error string `gorm:"type:text" json:"error,omitempty"`
 	Base
 	AgentID   uint       `gorm:"uniqueIndex:idx_vpc_agent_name,priority:1;not null" json:"agent_id"`
 	Name      string     `gorm:"uniqueIndex:idx_vpc_agent_name,priority:2;size:32;not null" json:"name"`

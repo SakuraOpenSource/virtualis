@@ -108,7 +108,7 @@ func (s *Store) SaveNamed(category, filename string, r io.Reader, limit int64) (
 
 func safeExtension(filename string) string {
 	name := strings.ToLower(filepath.Base(strings.TrimSpace(filename)))
-	for _, ext := range []string{".tar.gz", ".qcow2", ".vmdk", ".vdi", ".raw", ".img", ".iso", ".zip", ".gz"} {
+	for _, ext := range []string{".tar.gz", ".tar", ".qcow2", ".vmdk", ".vdi", ".raw", ".img", ".iso", ".zip", ".gz"} {
 		if strings.HasSuffix(name, ext) {
 			return ext
 		}
