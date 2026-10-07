@@ -31,6 +31,10 @@ func TestRecycleStopsAndRetainsOwnershipUntilPurge(t *testing.T) {
 	if err := f.db.Create(&vpc).Error; err != nil {
 		t.Fatal(err)
 	}
+	binding := model.InstanceSecurityGroup{InstanceID: f.inst.ID, SecurityGroupID: 1}
+	if err := f.db.Create(&binding).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := f.db.Model(&f.inst).Update("vpc_id", vpc.ID).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +85,7 @@ func TestRecycleStopsAndRetainsOwnershipUntilPurge(t *testing.T) {
 	if retained.InstanceID != nil || retained.Status != "free" {
 		t.Fatalf("purge did not release IP: %+v", retained)
 	}
-	for _, entity := range []any{&model.Instance{}, &model.Snapshot{}, &model.NATMapping{}} {
+	for _, entity := range []any{&model.Instance{}, &model.Snapshot{}, &model.NATMapping{}, &model.InstanceSecurityGroup{}} {
 		var n int64
 		f.db.Model(entity).Count(&n)
 		if n != 0 {

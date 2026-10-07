@@ -179,7 +179,7 @@ func (s *VirtualisService) PurgeInstance(ctx context.Context, id uint) (err erro
 		}
 	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, entity := range []any{&model.NATMapping{}, &model.FirewallRule{}, &model.Snapshot{}, &model.Backup{}} {
+		for _, entity := range []any{&model.NATMapping{}, &model.FirewallRule{}, &model.Snapshot{}, &model.Backup{}, &model.InstanceSecurityGroup{}} {
 			if err := tx.Where("instance_id = ?", id).Delete(entity).Error; err != nil {
 				return err
 			}
