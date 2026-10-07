@@ -489,6 +489,15 @@ func (s *VirtualisService) FreeIPPoolEntries(agentID uint) ([]FreeIPEntry, error
 	return out, nil
 }
 
+// AgentHasFreePoolEntry 报告节点是否还有可自动分配的池地址。
+func (s *VirtualisService) AgentHasFreePoolEntry(agentID uint) bool {
+	var count int64
+	if err := s.db.Model(&model.IPPoolEntry{}).Where("agent_id = ? AND status = ? AND instance_id IS NULL", agentID, model.IPPoolStatusFree).Count(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
+}
+
 func effectiveFreeEntry(entry model.IPPoolEntry, pool model.IPPool) FreeIPEntry {
 	prefix := entry.Prefix
 	if prefix <= 0 {
@@ -540,7 +549,7 @@ func (s *VirtualisService) poolEntryForCreate(agentID, entryID uint) (*model.IPP
 func (s *VirtualisService) assignPoolEntry(entryID, instanceID uint) error {
 	now := time.Now()
 	res := s.db.Model(&model.IPPoolEntry{}).
-		Where("id = ? AND status = ?", entryID, model.IPPoolStatusFree).
+		Where("id = ? AND status = ? AND instance_id IS NULL", entryID, model.IPPoolStatusFree).
 		Updates(map[string]any{
 			"status":      model.IPPoolStatusAssigned,
 			"instance_id": instanceID,

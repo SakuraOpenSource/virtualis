@@ -106,8 +106,8 @@ func (s *VirtualisService) MigrateInstance(ctx context.Context, id uint, req Mig
 		if e != nil {
 			return nil, agentFailure(e)
 		}
-		if hn.IPv4Count < 2 {
-			return nil, BadRequest("target needs two host IPv4 addresses")
+		if e = validateDedicatedHost(target.Network, hn); e != nil {
+			return nil, e
 		}
 		taken, e := s.dedicatedIPTaken(targetAgent.ID, target.Network.IPv4, id)
 		if e != nil {

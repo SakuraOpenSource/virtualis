@@ -144,27 +144,29 @@ func (s *VirtualisService) GetInstance(id uint) (*model.Instance, error) {
 
 func (s *VirtualisService) GetAnyInstance(id uint) (*model.Instance, error) {
 	var inst model.Instance
-	if err := s.db.Preload("Image").Preload("Agent").Preload("NATMappings", "reservation_operation = ''").Preload("VPC").Preload("FirewallRules", func(db *gorm.DB) *gorm.DB { return db.Order("priority ASC, id ASC") }).First(&inst, id).Error; err != nil {
+	if err := s.db.Preload("Image").Preload("Agent").Preload("NATMappings", "reservation_operation = ''").Preload("VPC").Preload("SecurityGroups", func(db *gorm.DB) *gorm.DB { return db.Order("id ASC") }).Preload("SecurityGroups.Rules", func(db *gorm.DB) *gorm.DB { return db.Order("priority ASC, id ASC") }).Preload("FirewallRules", func(db *gorm.DB) *gorm.DB { return db.Order("priority ASC, id ASC") }).First(&inst, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, NotFound("instance not found")
 		}
 		return nil, err
 	}
+	_, inst.FirewallPolicy = effectiveFirewall(&inst)
 	inst.SSHPassword = inst.LoadSSHPassword()
 	return &inst, nil
 }
 
 type CreateInstanceRequest struct {
-	Name    string              `json:"name"`
-	Driver  string              `json:"driver"`
-	Type    string              `json:"type"`
-	Spec    model.InstanceSpec  `json:"spec"`
-	Network model.NetworkConfig `json:"network"`
-	ImageID *uint               `json:"image_id"`
-	AgentID *uint               `json:"agent_id"`
+	SecurityGroupIDs []uint              `json:"security_group_ids"`
+	Name             string              `json:"name"`
+	Driver           string              `json:"driver"`
+	Type             string              `json:"type"`
+	Spec             model.InstanceSpec  `json:"spec"`
+	Network          model.NetworkConfig `json:"network"`
+	ImageID          *uint               `json:"image_id"`
+	AgentID          *uint               `json:"agent_id"`
 	// MaxNATMappings 是允许创建的 NAT 映射上限，0 表示不限。
 	MaxNATMappings int `json:"max_nat_mappings"`
-	// IPPoolEntryID 指定独立 IP 模式下从地址池选择的地址；0/空表示手填。
+	// IPPoolEntryID 指定池地址；省略且 IPv4 为空时自动分配所选节点地址。
 	IPPoolEntryID *uint `json:"ip_pool_entry_id"`
 	VPCID         *uint `json:"vpc_id"`
 	// AutoPassword 为 true（默认）时生成随机 root 密码并存库供管理页查看。
@@ -174,6 +176,9 @@ type CreateInstanceRequest struct {
 // CreateInstance records an instance and provisions it on the selected agent.
 func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanceRequest) (result *model.Instance, err error) {
 	if err := ValidateInstanceName(req.Name); err != nil {
+		return nil, err
+	}
+	if err := validateSecurityGroupIDs(req.SecurityGroupIDs); err != nil {
 		return nil, err
 	}
 	if req.AgentID == nil || *req.AgentID == 0 {
@@ -208,6 +213,11 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	}
 	if driverName != model.DriverAuto && !capabilityAvailable(capabilities, driverName) {
 		return nil, BadRequest("被控节点未安装驱动 %q", driverName)
+	}
+	if len(req.SecurityGroupIDs) > 0 {
+		if err := client.RequireFirewallPolicy(ctx, agentclient.Instance{Driver: driverName, FirewallPolicy: &model.FirewallPolicy{Ingress: "drop", Egress: "accept"}}); err != nil {
+			return nil, Conflict("无法创建安全组实例：%s", err)
+		}
 	}
 
 	def := s.settings.Virtualis()
@@ -302,16 +312,19 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	if err != nil {
 		return nil, BadRequest("%s", err.Error())
 	}
-	// 独立 IP 模式的两个闸门都在这里拦：
-	// 1) 主机必须有至少 2 个 IPv4 地址（一个归主机，才有富余给实例网段）；
-	// 2) 同一被控上不允许两个实例声明同一个独立 IP。
+	// 独立 IP 校验实际上联与主机地址冲突；池容量由事务内选取确认。
+	var hostNetwork *agentclient.HostNetworkSummary
+	autoPool := network.Mode == model.NetworkModeDedicated && (req.IPPoolEntryID == nil || *req.IPPoolEntryID == 0) && strings.TrimSpace(network.IPv4) == ""
 	if network.Mode == model.NetworkModeDedicated {
 		summary, hnErr := client.HostNetwork(ctx)
 		if hnErr != nil {
 			return nil, agentFailure(hnErr)
 		}
-		if summary.IPv4Count < 2 {
-			return nil, BadRequest("独立 IP 模式要求被控主机拥有至少 2 个 IPv4 地址，当前仅 %d 个", summary.IPv4Count)
+		hostNetwork = summary
+		if !autoPool {
+			if err := validateDedicatedHost(network, summary); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if network.IPv4 != "" {
@@ -364,7 +377,55 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	instance.BusyOperation = operationID
 	instance.BusyAction = "create"
 	instance.BusySince = &now
-	if err = s.db.Transaction(func(tx *gorm.DB) error {
+	baseNetwork := network
+	if err = s.createReservationTransaction(ctx, func(tx *gorm.DB) error {
+		instance.Base = model.Base{}
+		network = baseNetwork
+		// 先取节点行写锁，避免 SQLite 读事务升级死锁；同节点池选取、
+		// 地址 CAS 和实例创建在同一事务内。其它数据库也串行化同节点分配。
+		if e := tx.Model(&model.Agent{}).Where("id = ?", agent.ID).UpdateColumn("id", gorm.Expr("id")).Error; e != nil {
+			return e
+		}
+		if autoPool {
+			var entry model.IPPoolEntry
+			if e := tx.Where("agent_id = ? AND status = ? AND instance_id IS NULL", agent.ID, model.IPPoolStatusFree).Order("id ASC").First(&entry).Error; e != nil {
+				if errors.Is(e, gorm.ErrRecordNotFound) {
+					return Conflict("所选节点没有可用的独立 IP 池地址")
+				}
+				return e
+			}
+			pool, e := NewVirtualisService(tx).poolDefaults(agent.ID)
+			if e != nil {
+				return e
+			}
+			effective := effectiveFreeEntry(entry, pool)
+			network.IPv4 = effective.CIDR
+			if network.Gateway == "" {
+				network.Gateway = effective.Gateway
+			}
+			if len(network.DNS) == 0 {
+				network.DNS = effective.DNS
+			}
+			if strings.TrimSpace(req.Network.Bridge) == "" && effective.Interface != "" {
+				network.Bridge = effective.Interface
+			}
+			network, e = model.NormalizeNetworkConfig(network)
+			if e != nil {
+				return BadRequest("%s", e)
+			}
+			if e = validateDedicatedHost(network, hostNetwork); e != nil {
+				return e
+			}
+			taken, e := NewVirtualisService(tx).dedicatedIPTaken(agent.ID, network.IPv4, 0)
+			if e != nil {
+				return e
+			}
+			if taken {
+				return Conflict("池地址已被其它实例占用")
+			}
+			instance.Network = network
+			poolEntry = &entry
+		}
 		if instance.VPCID != nil {
 			if e := reserveVPCReference(tx, *instance.VPCID); e != nil {
 				return e
@@ -372,6 +433,18 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 		}
 		if e := tx.Create(instance).Error; e != nil {
 			return e
+		}
+		if len(req.SecurityGroupIDs) > 0 {
+			if e := bindSecurityGroups(tx, instance.ID, req.SecurityGroupIDs); e != nil {
+				return e
+			}
+			loaded, e := NewVirtualisService(tx).GetAnyInstance(instance.ID)
+			if e != nil {
+				return e
+			}
+			instance.SecurityGroups = loaded.SecurityGroups
+			instance.FirewallRevision = loaded.FirewallRevision
+			instance.FirewallPending = loaded.FirewallPending
 		}
 		if poolEntry != nil {
 			return NewVirtualisService(tx).assignPoolEntry(poolEntry.ID, instance.ID)
@@ -515,6 +588,19 @@ func (s *VirtualisService) dedicatedIPTaken(agentID uint, ip string, excludeID u
 		}
 		other := net.ParseIP(strings.Split(item.Network.IPv4, "/")[0])
 		if other != nil && other.Equal(ipAddr) {
+			return true, nil
+		}
+	}
+	// 池内已分配条目代表未证实的远程占用（失败保留/迁移中），同样视为冲突。
+	var entries []model.IPPoolEntry
+	if err := s.db.Where("agent_id = ? AND status = ? AND instance_id IS NOT NULL", agentID, model.IPPoolStatusAssigned).Find(&entries).Error; err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.InstanceID != nil && *entry.InstanceID == excludeID {
+			continue
+		}
+		if other := net.ParseIP(entry.IP); other != nil && other.Equal(ipAddr) {
 			return true, nil
 		}
 	}
@@ -1065,20 +1151,26 @@ func toWireImage(image *model.Image) *agentclient.Image {
 }
 
 func toWireInstance(instance *model.Instance, image *model.Image) agentclient.Instance {
+	rules, policy := effectiveFirewall(instance)
+	// 旧 wire 包含禁用规则（被控跳过）；保留该可观察兼容性。
+	if policy == nil {
+		rules = toWireFirewall(instance.FirewallRules)
+	}
 	return agentclient.Instance{
-		ID:          instance.ID,
-		Name:        instance.Name,
-		DisplayName: instance.DisplayName,
-		Driver:      instance.Driver,
-		Type:        instance.Type,
-		Status:      instance.Status,
-		ImageID:     instance.ImageID,
-		ObservedIP:  instance.ObservedIP,
-		Spec:        instance.Spec,
-		Network:     instance.Network,
-		Image:       toWireImage(image),
-		NATMappings: toWireMappings(instance.NATMappings),
-		Firewall:    toWireFirewall(instance.FirewallRules),
+		ID:             instance.ID,
+		Name:           instance.Name,
+		DisplayName:    instance.DisplayName,
+		Driver:         instance.Driver,
+		Type:           instance.Type,
+		Status:         instance.Status,
+		ImageID:        instance.ImageID,
+		ObservedIP:     instance.ObservedIP,
+		Spec:           instance.Spec,
+		Network:        instance.Network,
+		Image:          toWireImage(image),
+		NATMappings:    toWireMappings(instance.NATMappings),
+		Firewall:       rules,
+		FirewallPolicy: policy,
 	}
 }
 
@@ -1177,8 +1269,7 @@ func (s *VirtualisService) ConfigureInstanceNetwork(ctx context.Context, id uint
 			appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "validate", model.OperationFailed, "读取被控网卡失败", err)
 			return nil, operationID, err
 		}
-		if summary.IPv4Count < 2 {
-			err = BadRequest("独立 IP 模式要求被控主机拥有至少 2 个 IPv4 地址")
+		if err = validateDedicatedHost(desired, summary); err != nil {
 			appendOperationLog(s.db, id, operationID, model.OperationConfigureNetwork, "validate", model.OperationFailed, "独立 IP 条件不足", err)
 			return nil, operationID, err
 		}

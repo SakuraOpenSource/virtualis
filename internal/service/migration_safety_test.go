@@ -40,7 +40,7 @@ func TestMigrationFailuresNeverDeleteSourceOrUnownedTargetAndKeepRecovery(t *tes
 					return
 				}
 				if r.URL.Path == "/api/host/network" {
-					fmt.Fprint(w, `{"network":{"ipv4_count":2}}`)
+					fmt.Fprint(w, `{"network":{"ipv4_count":1,"interfaces":[{"name":"eth0","kind":"physical","state":"up","ipv4":["192.0.2.10/24"]}]}}`)
 					return
 				}
 				if r.Method == "DELETE" {

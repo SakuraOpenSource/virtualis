@@ -164,15 +164,18 @@ func (s *VirtualisService) syncFirewallIfRunning(ctx context.Context, id uint) e
 	if err != nil {
 		return err
 	}
-	if inst.Status != model.InstanceStatusRunning || inst.Agent == nil {
+	if inst.Status != model.InstanceStatusRunning {
 		return nil
+	}
+	if inst.Agent == nil {
+		return s.firewallSyncFailed(id, inst.FirewallRevision, Conflict("实例没有关联节点"))
 	}
 	client, err := s.agentClient(inst.Agent)
 	if err != nil {
-		return err
+		return s.firewallSyncFailed(id, inst.FirewallRevision, err)
 	}
 	if err := client.ApplyFirewall(ctx, toWireInstance(inst, inst.Image)); err != nil {
-		return Conflict("规则已保存，将在下次对账重试；当前下发失败：%s", err)
+		return s.firewallSyncFailed(id, inst.FirewallRevision, err)
 	}
-	return nil
+	return s.db.Model(&model.Instance{}).Where("id = ? AND firewall_revision = ?", id, inst.FirewallRevision).Updates(map[string]any{"firewall_pending": false, "firewall_error": "", "firewall_applied_revision": inst.FirewallRevision}).Error
 }
