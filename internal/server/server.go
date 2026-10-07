@@ -86,6 +86,8 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	authed.GET("/instances", h.Instances)
 	authed.POST("/instances", middleware.RequireAdmin(), h.CreateInstance)
 	authed.GET("/instances/:id", h.Instance)
+	authed.GET("/instances/:id/security-groups", h.InstanceSecurityGroups)
+	authed.PUT("/instances/:id/security-groups", middleware.RequireAdmin(), h.SetInstanceSecurityGroups)
 	authed.DELETE("/instances/:id", h.DeleteInstance)
 	authed.POST("/instances/:id/power", h.InstancePower)
 	authed.GET("/instances/:id/status", h.InstanceStatus)
@@ -117,6 +119,12 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 
 	// Admin-only settings & agents
 	admin := authed.Group("/admin", middleware.RequireAdmin())
+	admin.GET("/security-groups", h.SecurityGroups)
+	admin.POST("/security-groups", h.CreateSecurityGroup)
+	admin.GET("/security-groups/:id", h.SecurityGroup)
+	admin.PATCH("/security-groups/:id", h.UpdateSecurityGroup)
+	admin.DELETE("/security-groups/:id", h.DeleteSecurityGroup)
+	admin.PUT("/security-groups/:id/rules", h.ReplaceSecurityGroupRules)
 	admin.GET("/settings", h.Settings)
 	admin.PUT("/settings", h.UpdateSettings)
 	admin.GET("/settings/virtualis", h.VirtualisSettings)
@@ -149,6 +157,15 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	// Machine-to-machine open API: site API key auth instead of session
 	// cookies, so it also lives outside the CSRF group.
 	v1 := eng.Group("/api/v1", middleware.RequireInstalled(rt), middleware.RequireAPIKey(rt), middleware.APIRequestScope(), middleware.InstanceOwnership(rt))
+	providerGroups := v1.Group("/security-groups", middleware.RequireAdmin())
+	providerGroups.GET("", h.SecurityGroups)
+	providerGroups.POST("", h.CreateSecurityGroup)
+	providerGroups.GET("/:id", h.SecurityGroup)
+	providerGroups.PATCH("/:id", h.UpdateSecurityGroup)
+	providerGroups.DELETE("/:id", h.DeleteSecurityGroup)
+	providerGroups.PUT("/:id/rules", h.ReplaceSecurityGroupRules)
+	v1.GET("/instances/:id/security-groups", h.InstanceSecurityGroups)
+	v1.PUT("/instances/:id/security-groups", middleware.RequireAdmin(), h.SetInstanceSecurityGroups)
 	v1.GET("/images", h.V1Images)
 	v1.POST("/instances", h.V1CreateInstance)
 	v1.GET("/agents", h.V1Agents)

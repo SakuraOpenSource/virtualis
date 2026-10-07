@@ -2,6 +2,7 @@ package handler
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -28,15 +29,22 @@ func (h *Handler) V1CreateInstance(c *gin.Context) {
 			respond(c, nil, err)
 			return
 		}
+		// 独立 IP 缺地址时要求节点池仍有可自动分配的地址，避免选中
+		// 后才在事务里失败；NAT 与显式地址不受该过滤影响。
+		needsPool := strings.EqualFold(strings.TrimSpace(req.Network.Mode), model.NetworkModeDedicated) && (req.IPPoolEntryID == nil || *req.IPPoolEntryID == 0) && strings.TrimSpace(req.Network.IPv4) == ""
 		for _, agent := range agents {
-			if agent.IsOnline() {
+			if agent.IsOnline() && (!needsPool || h.virtualis().AgentHasFreePoolEntry(agent.ID)) {
 				id := agent.ID
 				req.AgentID = &id
 				break
 			}
 		}
 		if req.AgentID == nil {
-			BadRequest(c, "没有在线的被控节点，无法创建实例")
+			if needsPool {
+				Conflict(c, "没有剩余可自动分配独立 IP 的在线被控节点，请补充地址池或指定节点/地址")
+			} else {
+				BadRequest(c, "没有在线的被控节点，无法创建实例")
+			}
 			return
 		}
 	}

@@ -10,6 +10,9 @@ import (
 )
 
 func (c *Client) Resize(ctx context.Context, instance Instance, spec model.InstanceSpec, network model.NetworkConfig) (Instance, error) {
+	if err := c.RequireFirewallPolicy(ctx, instance); err != nil {
+		return Instance{}, err
+	}
 	var out struct {
 		Instance Instance `json:"instance"`
 	}

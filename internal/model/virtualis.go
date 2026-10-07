@@ -30,8 +30,7 @@ func ValidDriver(d string) bool {
 const (
 	// NetworkModeNAT 是 NAT 模式：实例经主机转发共享出口 IP。
 	NetworkModeNAT = "nat"
-	// NetworkModeDedicated 是独立 IP 模式：实例网卡直连主机网段。
-	// 仅当主机拥有至少 2 个 IPv4 地址时可用（创建时校验）。
+	// NetworkModeDedicated 是独立 IP 模式：按上联类型选择 routed/bridge。
 	NetworkModeDedicated = "dedicated"
 	// NetworkModeNone 关闭实例网络。
 	NetworkModeNone = "none"
@@ -76,6 +75,7 @@ type InstanceSpec struct {
 
 type NetworkConfig struct {
 	Mode          string   `json:"mode"`
+	DedicatedMode string   `json:"dedicated_mode,omitempty"`
 	Bridge        string   `json:"bridge,omitempty"`
 	MAC           string   `json:"mac,omitempty"`
 	IPv4          string   `json:"ipv4,omitempty"`
@@ -87,6 +87,10 @@ type NetworkConfig struct {
 
 func NormalizeNetworkConfig(network NetworkConfig) (NetworkConfig, error) {
 	network.Mode = strings.ToLower(strings.TrimSpace(network.Mode))
+	network.DedicatedMode = strings.ToLower(strings.TrimSpace(network.DedicatedMode))
+	if network.DedicatedMode != "" && network.DedicatedMode != "auto" && network.DedicatedMode != "routed" && network.DedicatedMode != "bridge" {
+		return network, errors.New("独立 IP 接入模式必须是 auto、routed 或 bridge")
+	}
 	// 历史数据里的 bridge 即独立 IP 模式，统一归一化。
 	if network.Mode == "bridge" {
 		network.Mode = NetworkModeDedicated
@@ -130,6 +134,15 @@ func NormalizeNetworkConfig(network NetworkConfig) (NetworkConfig, error) {
 		ip := net.ParseIP(network.Gateway)
 		if ip == nil || ip.To4() == nil {
 			return network, errors.New("网关地址格式无效")
+		}
+		if network.Mode == NetworkModeDedicated && !ip.IsGlobalUnicast() {
+			return network, errors.New("网关必须是单播 IPv4 地址")
+		}
+	}
+	if network.Mode == NetworkModeDedicated && network.IPv4 != "" {
+		ip := net.ParseIP(strings.Split(network.IPv4, "/")[0])
+		if ip == nil || !ip.IsGlobalUnicast() {
+			return network, errors.New("独立 IPv4 必须是单播地址")
 		}
 	}
 	if len(network.DNS) > 4 {
@@ -185,10 +198,16 @@ type Instance struct {
 	AgentID        *uint  `gorm:"index" json:"agent_id"`
 	Agent          *Agent `gorm:"foreignKey:AgentID" json:"agent,omitempty"`
 	// NATMappings 是该实例的 NAT 端口转发清单，由被控在开机时应用。
-	NATMappings   []NATMapping   `gorm:"foreignKey:InstanceID" json:"nat_mappings,omitempty"`
-	VPCID         *uint          `gorm:"index" json:"vpc_id"`
-	VPC           *VPC           `gorm:"foreignKey:VPCID" json:"vpc,omitempty"`
-	FirewallRules []FirewallRule `gorm:"foreignKey:InstanceID" json:"firewall_rules,omitempty"`
+	NATMappings             []NATMapping    `gorm:"foreignKey:InstanceID" json:"nat_mappings,omitempty"`
+	VPCID                   *uint           `gorm:"index" json:"vpc_id"`
+	VPC                     *VPC            `gorm:"foreignKey:VPCID" json:"vpc,omitempty"`
+	FirewallRules           []FirewallRule  `gorm:"foreignKey:InstanceID" json:"firewall_rules,omitempty"`
+	SecurityGroups          []SecurityGroup `gorm:"many2many:instance_security_groups" json:"security_groups,omitempty"`
+	FirewallPolicy          *FirewallPolicy `gorm:"-" json:"firewall_policy,omitempty"`
+	FirewallRevision        uint64          `gorm:"not null;default:0" json:"firewall_revision"`
+	FirewallAppliedRevision uint64          `gorm:"not null;default:0" json:"firewall_applied_revision"`
+	FirewallPending         bool            `gorm:"not null;default:false" json:"firewall_pending"`
+	FirewallError           string          `gorm:"type:text" json:"firewall_error,omitempty"`
 	// SSHPassword 是运行时注入的 root 密码（存 ConfigJSON），只在详情
 	// 接口填充，不落列。
 	SSHPassword string `gorm:"-" json:"ssh_password,omitempty"`

@@ -68,7 +68,8 @@ type Instance struct {
 	// NATMappings 是期望清单，被控开机时应用 DNAT、关机/删除时清除。
 	NATMappings []NATMapping `json:"nat_mappings,omitempty"`
 	// Firewall 是期望清单，被控按优先级对账 iptables 规则。
-	Firewall []FirewallRule `json:"firewall,omitempty"`
+	Firewall       []FirewallRule        `json:"firewall,omitempty"`
+	FirewallPolicy *model.FirewallPolicy `json:"firewall_policy,omitempty"`
 	// RootPassword 只随创建请求下发一次（写盘/初始 chpasswd 用）。
 	RootPassword string `json:"root_password,omitempty"`
 	// SSHReady 是被控回包字段：首次密码注入完成后为 true。
@@ -93,9 +94,10 @@ type Image struct {
 
 // Driver is an agent-side capability report.
 type Driver struct {
-	Name      string `json:"name"`
-	Available bool   `json:"available"`
-	Error     string `json:"error,omitempty"`
+	Name           string `json:"name"`
+	Available      bool   `json:"available"`
+	Error          string `json:"error,omitempty"`
+	FirewallPolicy bool   `json:"firewall_policy"`
 }
 
 // HostInterface 是被控主机上的一个网卡，供独立 IP 模式选择挂载目标。
@@ -111,7 +113,7 @@ type HostInterface struct {
 // HostNetworkSummary 汇总被控主机网络。
 type HostNetworkSummary struct {
 	Interfaces []HostInterface `json:"interfaces"`
-	// IPv4Count 是全部非 lo 网卡的 IPv4 地址数；独立 IP 模式要求 >= 2。
+	// IPv4Count 仅作遥测，不表示可分配池容量。
 	IPv4Count int `json:"ipv4_count"`
 }
 
@@ -269,6 +271,9 @@ func (c *Client) Drivers(ctx context.Context) ([]Driver, error) {
 // ConfigureNetwork synchronously asks the agent to re-run guest network/SSH/NAT setup.
 // It is intentionally separate from Network, which is read-only telemetry.
 func (c *Client) ConfigureNetwork(ctx context.Context, instance Instance, network model.NetworkConfig, password string) (Instance, string, error) {
+	if err := c.RequireFirewallPolicy(ctx, instance); err != nil {
+		return Instance{}, "", err
+	}
 	payload := struct {
 		Instance Instance            `json:"instance"`
 		Network  model.NetworkConfig `json:"network"`
@@ -327,6 +332,9 @@ func (c *Client) ApplyNAT(ctx context.Context, instance Instance) error {
 
 // ApplyFirewall 把实例的期望防火墙规则全量下发给被控对账（运行中即时生效）。
 func (c *Client) ApplyFirewall(ctx context.Context, instance Instance) error {
+	if err := c.RequireFirewallPolicy(ctx, instance); err != nil {
+		return err
+	}
 	body := map[string]any{"instance": instance, "rules": instance.Firewall}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -380,6 +388,9 @@ func (c *Client) SetRootPassword(ctx context.Context, instance Instance, passwor
 }
 
 func (c *Client) CreateInstance(ctx context.Context, instance Instance, image *Image, imageFile io.Reader, filename string, extraFile io.Reader, extraName string) (Instance, error) {
+	if err := c.RequireFirewallPolicy(ctx, instance); err != nil {
+		return Instance{}, err
+	}
 	instance.Image = image
 	var out struct {
 		Instance Instance `json:"instance"`
@@ -430,6 +441,11 @@ func (c *Client) DeleteInstance(ctx context.Context, instance Instance) error {
 }
 
 func (c *Client) PowerInstance(ctx context.Context, instance Instance, action string, image *Image, imageFile io.Reader, filename string, extraFile io.Reader, extraName string) (Instance, error) {
+	if action != "stop" && action != "hard_stop" {
+		if err := c.RequireFirewallPolicy(ctx, instance); err != nil {
+			return Instance{}, err
+		}
+	}
 	instance.Image = image
 	var out struct {
 		Instance Instance `json:"instance"`
@@ -469,6 +485,9 @@ func (c *Client) PowerInstance(ctx context.Context, instance Instance, action st
 }
 
 func (c *Client) Status(ctx context.Context, instance Instance) (Instance, error) {
+	if err := c.RequireFirewallPolicy(ctx, instance); err != nil {
+		return Instance{}, err
+	}
 	payload, err := json.Marshal(struct {
 		Instance Instance `json:"instance"`
 	}{Instance: instance})

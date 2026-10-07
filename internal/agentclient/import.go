@@ -10,6 +10,9 @@ import (
 // Import streams multipart from a file; closing the pipe on all exits releases
 // the producer even if the Agent rejects headers without consuming the body.
 func (c *Client) Import(ctx context.Context, instance Instance, file io.Reader, filename string, replace bool) (Instance, error) {
+	if err := c.RequireFirewallPolicy(ctx, instance); err != nil {
+		return Instance{}, err
+	}
 	body, contentType, err := multipartBody("instance", instance, "image", file, filename)
 	if err != nil {
 		return Instance{}, err
