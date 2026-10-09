@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -23,6 +25,29 @@ type Database struct {
 	User     string `json:"user,omitempty"`
 	Password string `json:"password,omitempty"`
 	Name     string `json:"name,omitempty"`
+	// SSLMode controls transport security for network databases. The default
+	// (empty) resolves to "prefer" for PostgreSQL, which negotiates TLS when
+	// the server offers it instead of the previous hard "disable" that sent
+	// credentials and data in the clear. MySQL accepts "true"/"false"/custom;
+	// empty keeps the driver default. SQLite ignores it. Existing config.json
+	// files without the field keep working unchanged (backwards compatible).
+	SSLMode string `json:"ssl_mode,omitempty"`
+}
+
+// DefaultSSLMode returns the driver-appropriate sslmode when none was
+// configured explicitly.
+func (d Database) DefaultSSLMode() string {
+	switch d.Driver {
+	case DriverPostgres:
+		if strings.TrimSpace(d.SSLMode) == "" {
+			return "prefer"
+		}
+	case DriverMySQL:
+		if strings.TrimSpace(d.SSLMode) == "" {
+			return ""
+		}
+	}
+	return strings.TrimSpace(d.SSLMode)
 }
 
 type Config struct {
@@ -113,9 +138,16 @@ func (d Database) DSN() (string, error) {
 	case DriverSQLite:
 		return d.Path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", nil
 	case DriverMySQL:
-		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=UTC", d.User, d.Password, d.Host, d.Port, d.Name), nil
+		// MySQL TLS: go-sql-driver takes a registered TLS config name
+		// ("true" enables the default one). Empty keeps the driver default
+		// for backwards compatibility with existing deployments.
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=UTC", d.User, d.Password, d.Host, d.Port, d.Name)
+		if mode := d.DefaultSSLMode(); mode != "" {
+			dsn += "&tls=" + url.QueryEscape(mode)
+		}
+		return dsn, nil
 	case DriverPostgres:
-		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", d.User, d.Password, d.Host, d.Port, d.Name), nil
+		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s", d.User, d.Password, d.Host, d.Port, d.Name, url.QueryEscape(d.DefaultSSLMode())), nil
 	}
 	return "", fmt.Errorf("unsupported driver")
 }

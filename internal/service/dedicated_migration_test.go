@@ -51,8 +51,9 @@ func TestDedicatedMigrationAcceptsSingleIPUplinkAndPreservesDesiredCIDR(t *testi
 		}
 	}))
 	defer target.Close()
-	agent := model.Agent{Name: "dedicated-target", Status: "online", Endpoint: target.URL, Token: "test-token", TokenHash: "test", Arch: "amd64"}
+	agent := model.Agent{Name: "dedicated-target", Status: "online", Endpoint: target.URL, TokenHash: "test", Arch: "amd64"}
 	f.db.Create(&agent)
+	NewAgentService(f.db).SeedRPCToken(agent.ID, "test-token")
 	f.svc.SaveIPPoolDefaults(agent.ID, IPPoolInput{Interface: "eth0", Prefix: 24, Gateway: "198.51.100.1"})
 	f.svc.AddIPPoolEntries(agent.ID, AddIPPoolEntriesInput{IPs: []string{"198.51.100.10"}})
 	entries, _ := f.svc.FreeIPPoolEntries(agent.ID)

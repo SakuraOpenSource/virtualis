@@ -27,9 +27,10 @@ type APIKeyService struct {
 
 func NewAPIKeyService(db *gorm.DB) *APIKeyService { return &APIKeyService{db: db} }
 
-// APIKeyCreateRequest is kept wire-compatible, but name/scopes/expiry are no
-// longer user-selectable: the site key always has every permission and never
-// expires.
+// APIKeyCreateRequest is the caller's requested key shape. Scopes and expiry
+// are honored as requested (validated against the supported scope set); an
+// omitted scopes list falls back to all scopes for wire compatibility with
+// older clients that expect a full-permission site key.
 type APIKeyCreateRequest struct {
 	Name      string   `json:"name"`
 	Scopes    []string `json:"scopes"`
@@ -41,21 +42,69 @@ type APIKeyCreated struct {
 	Secret string        `json:"secret"`
 }
 
-// Create creates the only active key, or rotates a previously revoked row.
-func (s *APIKeyService) Create(userID uint, _ APIKeyCreateRequest) (*APIKeyCreated, error) {
+// requestedScopes validates the requested scope list: it must be non-empty
+// and a subset of the supported scopes. Silently widening a requested
+// credential (the old behavior) would turn a leaked read-only key into a
+// purge-capable one, so unsupported scopes are rejected with 400 instead.
+func requestedScopes(req APIKeyCreateRequest) (model.ScopeList, error) {
+	if len(req.Scopes) == 0 {
+		return model.ScopeList(model.AllScopes()), nil
+	}
+	out := make(model.ScopeList, 0, len(req.Scopes))
+	seen := map[string]bool{}
+	for _, scope := range req.Scopes {
+		if !model.ValidScope(scope) {
+			return nil, BadRequest("unsupported scope %q", scope)
+		}
+		if seen[scope] {
+			continue
+		}
+		seen[scope] = true
+		out = append(out, scope)
+	}
+	if len(out) == 0 {
+		return nil, BadRequest("scopes must not be empty")
+	}
+	return out, nil
+}
+
+// requestedExpiry converts the requested validity in days to an absolute
+// expiry. Zero (the default) means the key never expires.
+func requestedExpiry(req APIKeyCreateRequest) *time.Time {
+	if req.ExpiresIn <= 0 {
+		return nil
+	}
+	at := time.Now().UTC().AddDate(0, 0, req.ExpiresIn)
+	return &at
+}
+
+// Create creates the only active key, or rotates a previously revoked row,
+// honoring the requested scopes and expiry.
+func (s *APIKeyService) Create(userID uint, req APIKeyCreateRequest) (*APIKeyCreated, error) {
+	scopes, err := requestedScopes(req)
+	if err != nil {
+		return nil, err
+	}
 	secret, err := GenerateSecret()
 	if err != nil {
 		return nil, err
 	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "Virtualis Site Key"
+	}
+	if len(name) > 64 {
+		return nil, BadRequest("key name too long")
+	}
 	prefixLen := len(apiKeyPrefix) + 8
 	key := model.APIKey{
 		UserID:    userID,
-		Name:      "Virtualis Site Key",
+		Name:      name,
 		Prefix:    secret[:prefixLen],
 		KeyHash:   HashAPIKey(secret),
-		Scopes:    model.ScopeList(model.AllScopes()),
+		Scopes:    scopes,
 		Status:    model.APIKeyActive,
-		ExpiresAt: nil,
+		ExpiresAt: requestedExpiry(req),
 	}
 	var result *model.APIKey
 	err = s.db.Transaction(func(tx *gorm.DB) error {
@@ -80,7 +129,7 @@ func (s *APIKeyService) Create(userID uint, _ APIKeyCreateRequest) (*APIKeyCreat
 				"key_hash":     key.KeyHash,
 				"scopes":       key.Scopes,
 				"status":       key.Status,
-				"expires_at":   nil,
+				"expires_at":   key.ExpiresAt,
 				"last_used_at": nil,
 			}).Error; err != nil {
 				return err
@@ -109,7 +158,10 @@ func (s *APIKeyService) Create(userID uint, _ APIKeyCreateRequest) (*APIKeyCreat
 	return &APIKeyCreated{Key: result, Secret: secret}, nil
 }
 
-// List returns at most one row for the site and normalizes legacy rows.
+// List is a pure read: it returns the newest row without elevating its scopes
+// or revoking other rows. Legacy normalization (scope widening, cleanup of
+// stray active rows) happens only on explicit admin actions (Create), never
+// as a side effect of a GET — a read must not change credential semantics.
 func (s *APIKeyService) List(userID uint) ([]model.APIKey, error) {
 	var keys []model.APIKey
 	if err := s.db.Order("id DESC").Find(&keys).Error; err != nil {
@@ -118,19 +170,7 @@ func (s *APIKeyService) List(userID uint) ([]model.APIKey, error) {
 	if len(keys) == 0 {
 		return []model.APIKey{}, nil
 	}
-	keep := keys[0]
-	if keep.Status == model.APIKeyActive {
-		if err := s.db.Model(&model.APIKey{}).Where("id <> ? AND status = ?", keep.ID, model.APIKeyActive).Update("status", model.APIKeyRevoked).Error; err != nil {
-			return nil, err
-		}
-	}
-	if keep.Scopes == nil || len(keep.Scopes) != len(model.AllScopes()) {
-		keep.Scopes = model.ScopeList(model.AllScopes())
-		if err := s.db.Model(&keep).Updates(map[string]any{"scopes": keep.Scopes, "user_id": userID}).Error; err != nil {
-			return nil, err
-		}
-	}
-	return []model.APIKey{keep}, nil
+	return []model.APIKey{keys[0]}, nil
 }
 
 func (s *APIKeyService) Revoke(id, _ uint) error {

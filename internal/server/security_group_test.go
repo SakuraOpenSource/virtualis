@@ -3,10 +3,12 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/SakuraOpenSource/virtualis/internal/model"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/SakuraOpenSource/virtualis/internal/model"
+	"github.com/SakuraOpenSource/virtualis/internal/service"
 )
 
 func TestSecurityGroupAdminCreateDefaults(t *testing.T) {
@@ -50,10 +52,11 @@ func TestSecurityGroupBindEmptyIngressSendsDropAndKeepsPrivateRules(t *testing.T
 		w.WriteHeader(204)
 	}))
 	defer remote.Close()
-	agent := model.Agent{Name: "sg-agent", Endpoint: remote.URL, Token: "test-token", TokenHash: "test", Status: "online"}
+	agent := model.Agent{Name: "sg-agent", Endpoint: remote.URL, TokenHash: "test", Status: "online"}
 	if err := f.db.Create(&agent).Error; err != nil {
 		t.Fatal(err)
 	}
+	service.NewAgentService(f.db).SeedRPCToken(agent.ID, "test-token")
 	f.db.Model(&f.inst).Updates(map[string]any{"agent_id": agent.ID, "status": "running"})
 	res := f.request(t, "POST", "/api/admin/security-groups", `{"name":"empty"}`, "", &f.admin)
 	var group struct {

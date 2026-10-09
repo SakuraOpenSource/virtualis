@@ -13,7 +13,7 @@ import (
 func TestV1AutoAgentSelectionSkipsNodesWithoutFreePool(t *testing.T) {
 	f := newAPIFixture(t)
 	seenAt := time.Now().UTC()
-	emptyAgent := model.Agent{Name: "nat-only", Status: "online", Endpoint: "http://127.0.0.1:9", Token: "t", TokenHash: "h", LastSeenAt: &seenAt}
+	emptyAgent := model.Agent{Name: "nat-only", Status: "online", Endpoint: "http://127.0.0.1:9", TokenHash: "h", LastSeenAt: &seenAt}
 	f.db.Create(&emptyAgent)
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -37,8 +37,10 @@ func TestV1AutoAgentSelectionSkipsNodesWithoutFreePool(t *testing.T) {
 		}
 	}))
 	defer remote.Close()
-	poolAgent := model.Agent{Name: "with-pool", Status: "online", Endpoint: remote.URL, Token: "test-token", TokenHash: "h", LastSeenAt: &seenAt}
+	poolAgent := model.Agent{Name: "with-pool", Status: "online", Endpoint: remote.URL, TokenHash: "h", LastSeenAt: &seenAt}
 	f.db.Create(&poolAgent)
+	// Plaintext tokens live in the process cache, not the database (SC-03).
+	service.NewAgentService(f.db).SeedRPCToken(poolAgent.ID, "test-token")
 	svc := service.NewVirtualisService(f.db)
 	svc.SaveIPPoolDefaults(poolAgent.ID, service.IPPoolInput{Gateway: "198.51.100.1", Prefix: 24, Interface: "eth0"})
 	svc.AddIPPoolEntries(poolAgent.ID, service.AddIPPoolEntriesInput{IPs: []string{"198.51.100.10"}})

@@ -16,7 +16,7 @@ func(s *VirtualisService)BatchInstances(ctx context.Context,req BatchInput,owner
   inst,err:=s.GetInstance(id)
   if err==nil&&ownerID!=0&&(inst.OwnerID==nil||*inst.OwnerID!=ownerID){err=Forbidden("instance ownership required")}
   if err==nil{err=ctx.Err()}
-  if err==nil{if req.Action=="delete"{err=s.DeleteInstance(ctx,id)}else{_,err=s.PowerInstance(ctx,id,req.Action)}}
+  if err==nil{if req.Action=="delete"{err=s.DeleteInstance(ctx,id)}else{_,err=s.PowerInstance(ctx,id,req.Action,nil)}}
   if err!=nil{out.Failed=append(out.Failed,BatchFailure{ID:id,Reason:err.Error()})}else{out.OK=append(out.OK,id)}
  }
  return out,nil

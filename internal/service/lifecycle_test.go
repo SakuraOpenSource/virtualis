@@ -103,9 +103,9 @@ func TestLifecycleConflictingPower(t *testing.T) {
 		replyLifecycle(w, inst)
 	})
 	done := make(chan error, 1)
-	go func() { _, err := f.svc.PowerInstance(context.Background(), f.inst.ID, "stop"); done <- err }()
+	go func() { _, err := f.svc.PowerInstance(context.Background(), f.inst.ID, "stop", nil); done <- err }()
 	<-entered
-	_, err := f.svc.PowerInstance(context.Background(), f.inst.ID, "start")
+	_, err := f.svc.PowerInstance(context.Background(), f.inst.ID, "start", nil)
 	close(release)
 	if first := <-done; first != nil {
 		t.Fatal(first)

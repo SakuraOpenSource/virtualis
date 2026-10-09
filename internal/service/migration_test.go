@@ -59,10 +59,11 @@ func TestMigrationImportsVerifiesSwitchesThenDeletesSource(t *testing.T) {
 		}
 	}))
 	defer target.Close()
-	agent := model.Agent{Name: "target", Status: "online", Endpoint: target.URL, Token: "test-token", TokenHash: "hash", Arch: "amd64"}
+	agent := model.Agent{Name: "target", Status: "online", Endpoint: target.URL, TokenHash: "hash", Arch: "amd64"}
 	if err := f.db.Create(&agent).Error; err != nil {
 		t.Fatal(err)
 	}
+	NewAgentService(f.db).SeedRPCToken(agent.ID, "test-token")
 	snap := model.Snapshot{InstanceID: f.inst.ID, AgentID: f.agent.ID, Name: "base", Status: "available"}
 	f.db.Create(&snap)
 	migrated, err := f.svc.MigrateInstance(context.Background(), f.inst.ID, MigrationInput{TargetAgentID: agent.ID})

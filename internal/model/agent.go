@@ -15,7 +15,10 @@ type Agent struct {
 	Base
 	Name        string     `gorm:"uniqueIndex;size:64;not null" json:"name"`
 	DisplayName string     `gorm:"size:128" json:"display_name"`
-	Token       string     `gorm:"size:64" json:"-"`
+	// The plaintext token is intentionally NOT a column: it is returned once
+	// at create/rotate and cached in process memory from heartbeats. Only
+	// TokenHash is persisted so database backups never contain node control
+	// credentials. Migrations blank out any historical plaintext values.
 	TokenHash   string     `gorm:"size:64;not null" json:"-"`
 	Status      string     `gorm:"size:16;not null;default:pending" json:"status"`
 	IP          string     `gorm:"size:64" json:"ip"`

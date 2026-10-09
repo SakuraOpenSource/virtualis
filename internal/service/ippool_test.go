@@ -36,12 +36,15 @@ func seedIPPoolAgent(t *testing.T, db *gorm.DB) model.Agent {
 		Status:    model.AgentStatusOnline,
 		Driver:    model.DriverIncus,
 		Endpoint:  "http://127.0.0.1:8081",
-		Token:     "test-token",
-		TokenHash: "test-hash",
+		TokenHash: "placeholder-synced-by-seed",
 	}
 	if err := db.Create(&agent).Error; err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
+	// Plaintext tokens live in the process cache, not the database (SC-03);
+	// SeedRPCToken syncs the row hash so the cache/row pair RPCToken
+	// verifies stays consistent.
+	NewAgentService(db).SeedRPCToken(agent.ID, "test-token")
 	return agent
 }
 

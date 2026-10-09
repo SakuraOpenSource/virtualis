@@ -219,6 +219,31 @@ func (s *VirtualisService) DeleteVPC(ctx context.Context, id uint) error {
 		if count > 0 {
 			return Conflict("VPC reserved by migration")
 		}
+		// A fenced migration also pins its SOURCE VPC: the database switch
+		// clears Instance.vpc_id before the source delete is confirmed, and
+		// the retained source runtime still needs that network for manual
+		// recovery. Both endpoints of a non-terminal migration block deletion.
+		if e := tx.Model(&model.Migration{}).Where("source_vpc_id = ? AND stage NOT IN ?", id, []string{"completed", "failed"}).Count(&count).Error; e != nil {
+			return e
+		}
+		if count > 0 {
+			return Conflict("VPC reserved by migration source")
+		}
+		// REV-MIGRATION-LEGACY-VPC: retained migrations recorded before the
+		// source_vpc_id column existed may still have NULL there even after
+		// the upgrade backfill (the instance row no longer identifies the
+		// source). Such rows are NOT reference-free: the suspended source
+		// runtime lives on the recorded source agent, so every VPC on that
+		// agent is a potential recovery network and must block deletion
+		// until an operator resolves the migration manually.
+		if e := tx.Model(&model.Migration{}).
+			Where("source_vpc_id IS NULL AND stage NOT IN ? AND source_agent_id = ?", []string{"completed", "failed"}, vpc.AgentID).
+			Count(&count).Error; e != nil {
+			return e
+		}
+		if count > 0 {
+			return Conflict("VPC 可能是历史迁移的保留源网络（%d 条未定迁移引用该节点），请先人工确认后再删除", count)
+		}
 		return nil
 	})
 	if err != nil {

@@ -190,6 +190,15 @@ type Instance struct {
 	SSHReady     bool   `gorm:"not null;default:false" json:"ssh_ready"`
 	NetworkError string `gorm:"type:text" json:"network_error,omitempty"`
 	ConfigJSON   string `gorm:"type:text" json:"-"`
+	// LifecycleGeneration is a monotonically increasing epoch for the
+	// instance's guest identity. Destructive guest replacements (reinstall,
+	// snapshot restore, migration switch) bump it inside their fence, and
+	// background observers (watchSSHReady) condition their writes on it:
+	// busy_operation='' AND agent_id unchanged is an ABA pattern across a
+	// reinstall — the fence comes back empty and the agent is the same, so
+	// a stale pre-reinstall status reply would otherwise mark the NEW guest
+	// with the OLD guest's readiness.
+	LifecycleGeneration int64 `gorm:"not null;default:0" json:"-"`
 	// MaxNATMappings 是该实例允许创建的 NAT 映射上限，0 表示不限。
 	MaxNATMappings int    `gorm:"not null;default:0" json:"max_nat_mappings"`
 	OwnerID        *uint  `gorm:"index" json:"owner_id"`

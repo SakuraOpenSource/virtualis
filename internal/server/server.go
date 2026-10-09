@@ -53,10 +53,10 @@ func New(rt *runtime.Runtime, debug bool) (*gin.Engine, func()) {
 	authGroup := secured.Group("/auth")
 	authGroup.POST("/login", h.Login)
 	// logout can be called with or without fresh auth; protect with auth when possible
-	authGroup.POST("/logout", middleware.RequireAuth(rt), h.Logout)
+	authGroup.POST("/logout", middleware.RequireAuth(rt, h.Revoker()), h.Logout)
 
 	// Authenticated routes.
-	authed := secured.Group("", middleware.RequireAuth(rt), middleware.InstanceOwnership(rt))
+	authed := secured.Group("", middleware.RequireAuth(rt, h.Revoker()), middleware.InstanceOwnership(rt))
 
 	authed.GET("/me", h.Me)
 	authed.PATCH("/me/email", h.UpdateEmail)

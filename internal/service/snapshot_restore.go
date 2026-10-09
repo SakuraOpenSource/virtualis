@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/SakuraOpenSource/virtualis/internal/model"
+	"gorm.io/gorm"
 )
 
 func (s *VirtualisService) RestoreSnapshot(ctx context.Context, id, sid uint) (result *model.Instance, err error) {
@@ -12,7 +13,11 @@ func (s *VirtualisService) RestoreSnapshot(ctx context.Context, id, sid uint) (r
 	if err != nil {
 		return nil, err
 	}
-	defer guard.finish(&err)
+	// finishInstance clears the released fence from the returned instance so
+	// clients do not keep rendering a completed operation as busy (the plain
+	// finish helper only releases the SQL row, leaving a stale token in the
+	// response payload).
+	defer guard.finishInstance(&err, &result)
 	ctx, cancel := context.WithTimeout(ctx, recoveryTimeout)
 	defer cancel()
 	snap, err := s.snapshot(id, sid)
@@ -33,9 +38,15 @@ func (s *VirtualisService) RestoreSnapshot(ctx context.Context, id, sid uint) (r
 		return nil, err
 	}
 	if _, err = client.Snapshot(ctx, toWireInstance(inst, inst.Image), snap.Name, "restore"); err != nil {
+		// A failed or lost restore response is not proof that the disk stayed
+		// unchanged: the agent performs its final os.Rename before replying,
+		// so the replacement may already have happened. Retain the durable
+		// fence until the intended recovery point is verified, mirroring the
+		// backup_restore semantics.
+		guard.retain = true
 		return nil, agentFailure(err)
 	}
-	if err = s.db.Model(inst).Updates(map[string]any{"status": model.InstanceStatusStopped, "config_json": snap.ConfigJSON, "ssh_ready": false, "observed_ip": ""}).Error; err != nil {
+	if err = s.db.Model(inst).Updates(map[string]any{"status": model.InstanceStatusStopped, "config_json": snap.ConfigJSON, "ssh_ready": false, "observed_ip": "", "lifecycle_generation": gorm.Expr("lifecycle_generation + 1")}).Error; err != nil {
 		guard.retain = true
 		return nil, err
 	}

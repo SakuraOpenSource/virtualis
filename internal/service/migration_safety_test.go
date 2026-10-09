@@ -69,10 +69,11 @@ func TestMigrationFailuresNeverDeleteSourceOrUnownedTargetAndKeepRecovery(t *tes
 				replyLifecycle(w, inst)
 			}))
 			defer target.Close()
-			agent := model.Agent{Name: "target", Status: "online", Endpoint: target.URL, Token: "test-token", TokenHash: "hash", Arch: "amd64"}
+			agent := model.Agent{Name: "target", Status: "online", Endpoint: target.URL, TokenHash: "hash", Arch: "amd64"}
 			if err := f.db.Create(&agent).Error; err != nil {
 				t.Fatal(err)
 			}
+			NewAgentService(f.db).SeedRPCToken(agent.ID, "test-token")
 			oldPool := model.IPPoolEntry{AgentID: f.agent.ID, IP: "192.0.2.1", Status: "assigned", InstanceID: &f.inst.ID}
 			newPool := model.IPPoolEntry{AgentID: agent.ID, IP: "192.0.2.2", Status: "free"}
 			f.db.Create(&oldPool)
@@ -116,7 +117,7 @@ func TestMigrationFailuresNeverDeleteSourceOrUnownedTargetAndKeepRecovery(t *tes
 				if oldPool.InstanceID == nil || newPool.InstanceID == nil {
 					t.Fatal("recoverable ownership prematurely released")
 				}
-				if _, e := NewVirtualisService(f.db).PowerInstance(context.Background(), f.inst.ID, "start"); e == nil {
+				if _, e := NewVirtualisService(f.db).PowerInstance(context.Background(), f.inst.ID, "start", nil); e == nil {
 					t.Fatal("dual start allowed")
 				}
 			}
@@ -141,8 +142,9 @@ func TestMigrationRejectsDestinationArchitectureAndDriverBeforeExport(t *testing
 		fmt.Fprint(w, `{"items":[{"name":"qemu","available":false}]}`)
 	}))
 	defer remote.Close()
-	agent := model.Agent{Name: "wrong", Status: "online", Endpoint: remote.URL, Token: "test-token", TokenHash: "hash", Arch: "arm64"}
+	agent := model.Agent{Name: "wrong", Status: "online", Endpoint: remote.URL, TokenHash: "hash", Arch: "arm64"}
 	f.db.Create(&agent)
+	NewAgentService(f.db).SeedRPCToken(agent.ID, "test-token")
 	if _, err := f.svc.MigrateInstance(context.Background(), f.inst.ID, MigrationInput{TargetAgentID: agent.ID}); err == nil {
 		t.Fatal("wrong arch accepted")
 	}

@@ -113,7 +113,9 @@ func (s *VirtualisService) RestoreTrashedInstance(ctx context.Context, id uint) 
 	if err != nil {
 		return nil, err
 	}
-	defer guard.finish(&err)
+	// finishInstance also clears the released busy token from the returned
+	// instance so the caller does not keep the UI disabled after success.
+	defer guard.finishInstance(&err, &result)
 	inst, err := s.GetAnyInstance(id)
 	if err != nil {
 		return nil, err

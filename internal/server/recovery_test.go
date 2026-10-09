@@ -70,7 +70,7 @@ func (f apiFixture) request(t *testing.T, method, path, body, key string, user *
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	if user != nil {
-		token, _, err := auth.GenerateToken(f.rt.JWTSecret(), user.ID, user.Role)
+		token, _, err := auth.GenerateToken(f.rt.JWTSecret(), user.ID, user.Role, user.SessionVersion)
 		if err != nil {
 			t.Fatal(err)
 		}

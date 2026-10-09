@@ -60,7 +60,9 @@ func (c *Client) Export(ctx context.Context, instance Instance) (io.ReadCloser, 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, 0, fmt.Errorf("export failed (%d): %s", resp.StatusCode, raw)
+		// Redact host paths from agent error bodies: this string flows into
+		// API-facing BizErrors (see redactAgentError).
+		return nil, 0, fmt.Errorf("export failed (%d): %s", resp.StatusCode, redactAgentError(string(raw)))
 	}
 	if resp.ContentLength > 64<<30 {
 		_ = resp.Body.Close()

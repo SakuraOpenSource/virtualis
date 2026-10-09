@@ -10,7 +10,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -220,6 +222,23 @@ func (c *Client) newRequest(ctx context.Context, method, p string, body io.Reade
 	return req, nil
 }
 
+// redactAgentError strips absolute host paths from agent-provided error text
+// before it can flow into API responses. Agents legitimately embed archive
+// locations (e.g. rollback directories) in their errors for operators, but
+// those messages travel unchanged through agentFailure into public BizError
+// bodies; keeping only path basenames preserves the useful identifier (which
+// archive, which file) without disclosing the node's directory layout.
+func redactAgentError(msg string) string {
+	pathRe := regexp.MustCompile(`(?:[A-Za-z]:)?/[^\s"'` + "`" + `,]+(?:/[^\s"'` + "`" + `,]+)*`)
+	return pathRe.ReplaceAllStringFunc(msg, func(match string) string {
+		base := path.Base(match)
+		if base == "/" || base == "." {
+			return match
+		}
+		return base
+	})
+}
+
 func (c *Client) do(req *http.Request, out any) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -242,7 +261,7 @@ func (c *Client) do(req *http.Request, out any) error {
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("被控节点版本过旧，缺少当前接口（%s），请重启最新 virtualis-agent", req.URL.Path)
 		}
-		return fmt.Errorf("被控请求失败: %s", msg)
+		return fmt.Errorf("被控请求失败: %s", redactAgentError(msg))
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
