@@ -35,8 +35,24 @@ func appendOperationLog(db *gorm.DB, instanceID uint, operationID, action, stage
 }
 
 // InstanceOperationLogs returns recent logs, newest first.
+//
+// Trashed instances are deliberately included: this is a read-only
+// diagnostics endpoint, and the recycle bin is exactly where a retained
+// recovery fence strands an instance — refusing logs there would hide the
+// persisted operation history the operator needs to decide on manual
+// recovery. Ownership/authorization is still enforced by the route middleware
+// (InstanceOwnership consults the raw row, not GetInstance).
+//
+// There is intentionally no supported "release the durable fence" primitive:
+// the fence exists because a crashed operation may still be running on the
+// node and automatic or casual unlocking risks dual starts. Supported
+// recovery is manual and staged: an administrator verifies on the node that
+// the runtime is stopped and the disk state matches the intended recovery
+// point, then clears busy_operation for that single row in the database
+// while the master service is stopped. Never clear it just because time
+// passed.
 func (s *VirtualisService) InstanceOperationLogs(instanceID uint, offset, limit int) ([]model.InstanceOperationLog, int64, error) {
-	if _, err := s.GetInstance(instanceID); err != nil {
+	if _, err := s.GetAnyInstance(instanceID); err != nil {
 		return nil, 0, err
 	}
 	var total int64

@@ -531,19 +531,21 @@ func (s *VirtualisService) CreateInstance(ctx context.Context, req CreateInstanc
 	return s.GetInstance(instance.ID)
 }
 
-// watchSSHReady 轮询被控状态，直至首次密码注入完成（SSHReady=true）或超时。
-// 失败保持安静：ssh_ready 维持 false，用户可用“配置网络”显式重试。
+// watchSSHReady observes readiness only, and only while the instance is
+// unfenced. It deliberately does NOT take its own beginOperation fence: this
+// is a best-effort background observation of first-boot password injection,
+// and a watcher silently holding the lifecycle fence would block exactly the
+// power/restore operations that are supposed to outrank it. The trade-off is
+// documented: while another operation holds the fence the watcher stops
+// polling entirely (the fenced operation's own status reconciliation will
+// converge ssh_ready), and the watcher re-reads the instance every iteration
+// so a changed AgentID/ownership is never sent to a stale client.
 func (s *VirtualisService) watchSSHReady(instanceID uint, agent *model.Agent) {
 	if agent == nil {
 		return
 	}
-	client, err := s.agentClient(agent)
-	if err != nil {
-		return
-	}
-	// 6 分钟耐心：精简镜像要现装 openssh-server（apt update + install），
-	// 注入通常 2-4 分钟，慢源更久。轮询本身就是 agent 的 /status，顺带
-	// 帮 NAT 对账；实例被删时 GetInstance 报错即退出。
+	// 6 minutes of patience: minimal images install openssh-server on first
+	// boot (apt update + install), injection usually takes 2-4 minutes.
 	for attempt := 0; attempt < 60; attempt++ {
 		if attempt > 0 {
 			select {
@@ -552,9 +554,25 @@ func (s *VirtualisService) watchSSHReady(instanceID uint, agent *model.Agent) {
 		}
 		instance, err := s.GetInstance(instanceID)
 		if err != nil {
-			return // 实例已被删除
+			return // instance deleted
 		}
 		if instance.SSHReady {
+			return
+		}
+		// A durable fence owned by another operation means that operation is
+		// reconciling the instance right now; a background watcher must not
+		// race it with parallel agent status calls or readiness writes.
+		if instance.BusyOperation != "" {
+			return
+		}
+		// Resolve the client from the CURRENT row, not the captured agent:
+		// during the watcher's lifetime the instance may migrate or be
+		// restored to a different node.
+		if instance.Agent == nil {
+			return
+		}
+		client, err := s.agentClient(instance.Agent)
+		if err != nil {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -564,8 +582,25 @@ func (s *VirtualisService) watchSSHReady(instanceID uint, agent *model.Agent) {
 			continue
 		}
 		if remote.SSHReady {
-			updates := map[string]any{"ssh_ready": true}
-			_ = s.db.Model(&model.Instance{}).Where("id = ?", instanceID).Updates(updates).Error
+			// The write is conditioned on the instance still being unfenced
+			// and still owned by this agent, so a migration/restore that
+			// started mid-call cannot have its result clobbered.
+			agentID := uint(0)
+			if instance.AgentID != nil {
+				agentID = *instance.AgentID
+			}
+			// The write is conditioned on the instance still being unfenced,
+			// still owned by this agent, AND still the same guest generation
+			// the status reply was captured for. busy='' + same agent alone is
+			// an ABA across a same-node reinstall (fence comes back empty,
+			// agent unchanged); the generation clause makes the stale reply a
+			// no-op instead of overwriting the new guest's readiness.
+			res := s.db.Model(&model.Instance{}).
+				Where("id = ? AND busy_operation = '' AND agent_id = ? AND lifecycle_generation = ?", instanceID, agentID, instance.LifecycleGeneration).
+				Update("ssh_ready", true)
+			if res.Error != nil || res.RowsAffected != 1 {
+				return
+			}
 			return
 		}
 	}
@@ -643,12 +678,36 @@ func capabilityAvailable(items []agentclient.Driver, name string) bool {
 	return false
 }
 
-func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action string) (result *model.Instance, err error) {
-	guard, err := s.beginOperation(ctx, id, model.OperationPower)
+// PowerInstance executes a power action. For reinstall the optional imageID
+// selects a different base image; it is applied only after the fence is held.
+// callerRef (the plugin's X-Levis-Operation-ID) is persisted with the
+// operation logs for upstream correlation.
+func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action string, imageID *uint, callerRef ...string) (result *model.Instance, err error) {
+	// The caller id must be part of the fence claim itself: claiming first
+	// and recording the ref afterwards left a window where a same-id retry
+	// could not be matched and re-ran the destructive RPC.
+	ref := ""
+	for _, r := range callerRef {
+		ref = r
+	}
+	// The idempotency record keys on the CONCRETE action ("stop"/"start"/
+	// "reinstall"), not the route-level "power": one upstream id reused for
+	// start after stop would otherwise be treated as a legal replay of a
+	// different destructive operation.
+	recordAction := model.OperationPower + ":" + action
+	guard, err := s.beginOperationWithRef(ctx, id, recordAction, ref)
 	if err != nil {
 		return nil, err
 	}
-	defer guard.finish(&err)
+	if guard.replay {
+		// Idempotent retry of an already-succeeded operation: return the
+		// current instance state; never re-send the RPC.
+		return s.GetInstance(id)
+	}
+	// finishInstance also strips the released busy token from the returned
+	// instance; returning the token made clients keep treating a completed
+	// operation as permanently busy.
+	defer guard.finishInstance(&err, &result)
 	operationID := guard.token
 	appendOperationLog(s.db, id, operationID, model.OperationPower, "start", model.OperationRunning, "开始执行 "+action, nil)
 	if !model.ValidAction(action) {
@@ -663,6 +722,32 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	}
 	if action == model.ActionReinstall && !s.settings.Virtualis().AllowReinstall {
 		return nil, Forbidden("reinstall disabled")
+	}
+	// Reinstall image selection happens inside the lifecycle fence so a
+	// rejected request (disabled reinstall, busy instance, invalid image)
+	// can never mutate the instance's image association. When a different
+	// image is selected, the instance row AND the in-memory association are
+	// reloaded from the database: the preloaded Image association still
+	// points at the OLD image, and using it would send the old image's
+	// metadata/file to the agent while persisting the new image_id — the
+	// guest gets reinstalled with the wrong OS and the subsequent GORM
+	// Updates writes the stale association back over the new one.
+	if action == model.ActionReinstall && imageID != nil {
+		selected, err := s.GetImage(*imageID)
+		if err != nil {
+			return nil, err
+		}
+		if instance.ImageID == nil || *instance.ImageID != *imageID {
+			if err := s.db.Model(&model.Instance{}).Where("id = ? AND busy_operation = ?", id, guard.token).Update("image_id", *imageID).Error; err != nil {
+				return nil, err
+			}
+		}
+		// Bind the freshly selected image regardless: the preloaded
+		// association may be stale even when the id matches (image row
+		// re-uploaded meanwhile). instance.Image is what openImage and
+		// toWireImage consume.
+		instance.Image = selected
+		instance.ImageID = &selected.ID
 	}
 	client, err := s.agentClient(instance.Agent)
 	if err != nil {
@@ -697,6 +782,16 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	remote, err := client.PowerInstance(ctx, wireInstance, action, toWireImage(instance.Image), reader, filename, extraReader, extraName)
 	if err != nil {
 		_ = s.db.Model(instance).Update("status", model.InstanceStatusError).Error
+		if action == model.ActionReinstall {
+			// A failed or lost reinstall response is not proof the disk was
+			// left untouched: the agent replaces the disk before replying,
+			// so the guest may already be running the new image (or be half
+			// written). Retain the durable fence until the intended image
+			// and disk state are verified, mirroring the snapshot_restore
+			// semantics for equally destructive operations. A plain
+			// status=error write is an observation, not a fence.
+			guard.retain = true
+		}
 		return nil, agentFailure(err)
 	}
 	applyWireInstance(instance, remote)
@@ -708,9 +803,11 @@ func (s *VirtualisService) PowerInstance(ctx context.Context, id uint, action st
 	}
 	updates := map[string]any{"status": instance.Status, "driver": instance.Driver, "network": string(networkJSON), "ip": instanceDisplayIP(instance), "observed_ip": instance.ObservedIP}
 	// 重装等于换了个全新 guest：旧的 SSH 就绪状态作废，等后台注入完成后
-	// 由 watchSSHReady 重新置 true。
+	// 由 watchSSHReady 重新置 true。generation 递增让重装前起飞的旧
+	// watcher 回包无法把新 guest 标成就绪（ABA 防护）。
 	if action == model.ActionReinstall {
 		updates["ssh_ready"] = false
+		updates["lifecycle_generation"] = gorm.Expr("lifecycle_generation + 1")
 	}
 	if err := s.db.Model(instance).Updates(updates).Error; err != nil {
 		return nil, err
@@ -898,10 +995,14 @@ func (s *VirtualisService) agentClient(agent *model.Agent) (*agentclient.Client,
 	if agent == nil || strings.TrimSpace(agent.Endpoint) == "" {
 		return nil, Conflict("被控节点没有可访问的 endpoint")
 	}
-	if strings.TrimSpace(agent.Token) == "" {
-		return nil, Conflict("被控 token 已失效，请删除节点后重新添加")
+	// Plaintext tokens live in the process-wide memory cache (populated at
+	// create/rotate time and by every authenticated heartbeat), never in the
+	// database — see AgentService.RPCToken for the cold-restart semantics.
+	token, err := NewAgentService(s.db).RPCToken(agent.ID)
+	if err != nil {
+		return nil, err
 	}
-	client, err := agentclient.New(agent.Endpoint, agent.Token)
+	client, err := agentclient.New(agent.Endpoint, token)
 	if err != nil {
 		return nil, agentFailure(err)
 	}
