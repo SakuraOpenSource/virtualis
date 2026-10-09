@@ -37,6 +37,44 @@ After installation, the data directory contains `config.json` and the database f
 
 Deleting `config.json` returns the program to the uninstalled state (data in the database is kept).
 
+#### Database `ssl_mode` (backwards compatible)
+
+`config.json`'s `database` object accepts an optional `ssl_mode` field for
+network databases:
+
+- **postgres**: any libpq `sslmode` (`prefer`, `require`, `verify-ca`,
+  `verify-full`, `disable`). Omitted defaults to `prefer` — TLS is negotiated
+  whenever the server offers it. Existing configs without the field behave as
+  `prefer` (previously the DSN hard-coded `disable`); set `ssl_mode=disable`
+  explicitly if the old behavior is required.
+- **mysql**: the go-sql-driver `tls` parameter value (e.g. `true`). Omitted
+  keeps the driver default (no explicit TLS parameter), matching older
+  deployments.
+- **sqlite**: ignored.
+
+```json
+{
+  "database": {
+    "driver": "postgres",
+    "host": "db.internal",
+    "port": 5432,
+    "user": "virtualis",
+    "password": "…",
+    "name": "virtualis",
+    "ssl_mode": "verify-full"
+  }
+}
+```
+
+#### Agent tokens are never stored in plaintext
+
+The agents table keeps only a SHA-256 token hash. The plaintext token is
+shown once when a node is created or its token is rotated, and the master
+re-learns it from each agent's authenticated heartbeat (every 30 s) in
+memory. After a master restart, agent RPC calls fail with a clear
+"waiting for node heartbeat" error until the next heartbeat arrives; rotate
+the token if a node is permanently unavailable.
+
 If the administrator password is forgotten, stop the service and run:
 
 ```bash
