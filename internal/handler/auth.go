@@ -2,9 +2,11 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/SakuraOpenSource/virtualis/internal/auth"
 	"github.com/SakuraOpenSource/virtualis/internal/config"
@@ -12,6 +14,9 @@ import (
 	"github.com/SakuraOpenSource/virtualis/internal/model"
 	"github.com/SakuraOpenSource/virtualis/internal/service"
 )
+
+// CodeTooManyRequests marks the 429 produced by the login failure limiter.
+const CodeTooManyRequests = "TOO_MANY_REQUESTS"
 
 // Bootstrap exposes installation status and site info for the frontend.
 func (h *Handler) Bootstrap(c *gin.Context) {
@@ -67,10 +72,19 @@ type LoginRequest struct {
 }
 
 // Login authenticates admin and issues session cookies.
-// Captcha is verified when the login scene is enabled.
+// Captcha is verified when the login scene is enabled. Failure throttling
+// (account + source IP) runs unconditionally — captcha stays optional by
+// default, but the limiter must always bound password guessing attempts and
+// the bcrypt CPU they consume.
 func (h *Handler) Login(c *gin.Context) {
 	var req LoginRequest
 	if !bindJSON(c, &req) {
+		return
+	}
+	ip := c.ClientIP()
+	// The limiter check precedes captcha and password verification so locked
+	// out requests end here without spending bcrypt CPU.
+	if !h.allowLogin(c, loginScopeLogin, req.Identifier, ip) {
 		return
 	}
 	if err := h.captchaSvc().Verify(service.CaptchaSceneLogin, req.CaptchaID, req.CaptchaCode); err != nil {
@@ -79,9 +93,11 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 	user, err := h.users().Login(req.Identifier, req.Password)
 	if err != nil {
+		h.loginTracker.RecordFailure(loginScopeLogin, req.Identifier, ip)
 		respond(c, nil, err)
 		return
 	}
+	h.loginTracker.RecordSuccess(loginScopeLogin, req.Identifier)
 	if err := h.setSession(c, user); err != nil {
 		respond(c, nil, err)
 		return
@@ -89,8 +105,55 @@ func (h *Handler) Login(c *gin.Context) {
 	OK(c, gin.H{"user": user})
 }
 
-// Logout clears authentication cookies.
+// allowLogin checks the failure limiter and writes 429 + Retry-After when the
+// attempt is not allowed. The message does not reveal which dimension
+// (account or source) is locked, to avoid telling probers where to pivot.
+func (h *Handler) allowLogin(c *gin.Context, scope, identifier, ip string) bool {
+	if ok, wait := h.loginTracker.Check(scope, identifier, ip); !ok {
+		seconds := int(wait.Seconds())
+		if seconds < 1 {
+			seconds = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(seconds))
+		Fail(c, http.StatusTooManyRequests, CodeTooManyRequests, "too many attempts, retry later")
+		return false
+	}
+	return true
+}
+
+// Logout revokes the current token server-side and clears cookies.
+//
+// Dropping cookies only affects the browser that still holds them; a copied
+// token keeps working until natural expiry. The revocation is persisted in
+// the shared database (revoked_tokens) BEFORE the 204 is returned, so every
+// replica enforces it and it survives restarts. Tokens without a jti
+// (pre-upgrade format) cannot be identified for precise revocation; for
+// those, logout bumps the account's session_version, which invalidates the
+// whole session family on every replica at once.
 func (h *Handler) Logout(c *gin.Context) {
+	if token, err := c.Cookie(auth.CookieToken); err == nil && token != "" {
+		if claims, err := auth.ParseToken(h.rt.JWTSecret(), token); err == nil {
+			if claims.ID != "" && claims.ExpiresAt != nil {
+				// Fail closed: a logout whose revocation could not be
+				// persisted must not report success, otherwise the client
+				// believes the session is dead while the token still
+				// authenticates on the next replica.
+				if err := h.revoker.Revoke(claims.ID, claims.ExpiresAt.Time); err != nil {
+					Internal(c, "logout unavailable, try again")
+					return
+				}
+			} else {
+				// Legacy token (no jti): retire the entire session family
+				// via the version counter — precise per-token revocation is
+				// impossible without an identifier.
+				if err := h.db().Model(&model.User{}).Where("id = ?", claims.UserID).
+					Update("session_version", gorm.Expr("session_version + 1")).Error; err != nil {
+					Internal(c, "logout unavailable, try again")
+					return
+				}
+			}
+		}
+	}
 	h.dropCookie(c, auth.CookieToken, true)
 	h.dropCookie(c, auth.CookieCSRF, false)
 	noContent(c)
@@ -152,7 +215,10 @@ func (h *Handler) UpdatePassword(c *gin.Context) {
 }
 
 func (h *Handler) setSession(c *gin.Context, u *model.User) error {
-	token, _, err := auth.GenerateToken(h.rt.JWTSecret(), u.ID, u.Role)
+	// Sign under the CURRENT session_version read with the user row: after a
+	// password change the handler re-reads the user, so this token carries
+	// the incremented version and survives the equality check.
+	token, _, err := auth.GenerateToken(h.rt.JWTSecret(), u.ID, u.Role, u.SessionVersion)
 	if err != nil {
 		return err
 	}

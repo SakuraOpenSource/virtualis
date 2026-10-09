@@ -21,6 +21,7 @@ import (
 	"github.com/SakuraOpenSource/virtualis/internal/runtime"
 	"github.com/SakuraOpenSource/virtualis/internal/server"
 	"github.com/SakuraOpenSource/virtualis/internal/web"
+	"gorm.io/gorm"
 )
 
 var version = "dev"
@@ -89,7 +90,17 @@ func resetAdminPassword(dataDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := db.Model(&model.User{}).Where("id = ?", user.ID).Update("password_hash", hash).Error; err != nil {
+	// Bump password_changed_at together with the hash: a CLI reset is exactly
+	// the "credential may have been stolen" recovery path, so every session
+	// issued before the reset must be rejected on the next request. The
+	// session_version increment is what actually enforces it — it retires
+	// same-second sessions and pre-upgrade tokens without a sess_ver claim.
+	changed := time.Now().UTC()
+	if err := db.Model(&model.User{}).Where("id = ?", user.ID).Updates(map[string]any{
+		"password_hash":     hash,
+		"password_changed_at": changed,
+		"session_version":   gorm.Expr("session_version + 1"),
+	}).Error; err != nil {
 		return err
 	}
 	fmt.Printf("administrator password reset for %s\n", user.Username)

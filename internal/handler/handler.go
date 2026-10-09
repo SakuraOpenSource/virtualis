@@ -9,11 +9,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/SakuraOpenSource/virtualis/internal/auth"
 	"github.com/SakuraOpenSource/virtualis/internal/captcha"
+	"github.com/SakuraOpenSource/virtualis/internal/loginlimit"
 	"github.com/SakuraOpenSource/virtualis/internal/runtime"
 	"github.com/SakuraOpenSource/virtualis/internal/service"
 	"github.com/SakuraOpenSource/virtualis/internal/storage"
 )
+
+// loginScopeLogin is the (single) login entrance scope used by the failure
+// limiter; kept as a constant so future separate entrances count separately.
+const loginScopeLogin = "login"
 
 // Handler groups runtime and shared collaborators.
 // Services that need a *gorm.DB are created on demand because the DB
@@ -31,7 +37,22 @@ type Handler struct {
 	cancel    context.CancelFunc
 	done      chan struct{}
 	closeOnce sync.Once
+	// loginTracker counts login failures and temporarily locks accounts and
+	// sources; it must be process-wide because issue and check happen in
+	// different requests (see internal/loginlimit).
+	loginTracker *loginlimit.Tracker
+	// revoker is the durable logout revocation list, also process-wide (see
+	// internal/auth/revocation_persist.go). Backed by the shared database so
+	// a logout is honored by every replica and survives restarts; before the
+	// runtime is activated (fresh install) the DB handle is nil and the list
+	// degrades to fail-closed lookups.
+	revoker *authRevoker
 }
+
+// authRevoker is the process-wide revocation registry. It is the persistent
+// implementation backed by the database; the in-memory only variant is kept
+// solely for the pre-installation window where no database exists yet.
+type authRevoker = auth.PersistentRevocationList
 
 // New creates a Handler backed by rt.
 func New(rt *runtime.Runtime) *Handler {
@@ -42,6 +63,8 @@ func New(rt *runtime.Runtime) *Handler {
 		storage:      storage.New(rt.DataDir()),
 		virtSvc:      service.NewVirtualisService(rt.DB(), storage.New(rt.DataDir())),
 		virtDB:       rt.DB(),
+		loginTracker: loginlimit.New(),
+		revoker:      auth.NewPersistentRevocationList(rt.DB()),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
@@ -51,9 +74,14 @@ func New(rt *runtime.Runtime) *Handler {
 }
 
 // Close releases background resources held by the handler.
-// Currently storage and captcha store need no cleanup, but the method
-// is kept for symmetry with server lifecycle.
-func (h *Handler) Close() { h.closeOnce.Do(func() { h.cancel(); <-h.done }) }
+func (h *Handler) Close() {
+	h.closeOnce.Do(func() {
+		h.cancel()
+		<-h.done
+		h.loginTracker.Close()
+		h.revoker.Close()
+	})
+}
 
 func (h *Handler) db() *gorm.DB { return h.rt.DB() }
 
@@ -105,6 +133,10 @@ func (h *Handler) trashScheduler(ctx context.Context) {
 }
 
 func (h *Handler) agents() *service.AgentService { return service.NewAgentService(h.db()) }
+
+// Revoker exposes the process-wide logout revocation list so the router can
+// hand it to RequireAuth.
+func (h *Handler) Revoker() *auth.PersistentRevocationList { return h.revoker }
 
 // respond converts service errors into HTTP responses.
 // BizError is rendered with its embedded status/code/message,

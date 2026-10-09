@@ -76,6 +76,13 @@ func (s *UserService) ChangeEmail(userID uint, password, newEmail string) error 
 }
 
 // ChangePassword updates password after verifying old password.
+//
+// The update increments session_version atomically with the new hash:
+// RequireAuth demands token sess_ver == users.session_version, so every
+// session issued before this change — including ones issued in the same
+// wall-clock second, which a truncated timestamp comparison cannot
+// distinguish — is rejected on its next request. The new token is signed
+// only after the incremented row is re-read.
 func (s *UserService) ChangePassword(userID uint, oldPassword, newPassword string) error {
 	user, err := s.requireUser(userID)
 	if err != nil {
@@ -94,7 +101,15 @@ func (s *UserService) ChangePassword(userID uint, oldPassword, newPassword strin
 	if err != nil {
 		return err
 	}
-	return s.db.Model(&model.User{}).Where("id = ?", userID).Update("password_hash", hash).Error
+	user.TouchPassword()
+	return s.db.Model(&model.User{}).Where("id = ?", userID).Updates(map[string]any{
+		"password_hash":      hash,
+		"password_changed_at": user.PasswordChangedAt,
+		// gorm.Expr keeps the increment atomic inside the same UPDATE as the
+		// hash swap: a concurrent login can never observe the new hash with
+		// the old version (or vice versa).
+		"session_version":    gorm.Expr("session_version + 1"),
+	}).Error
 }
 
 func (s *UserService) requireUser(userID uint) (*model.User, error) {
