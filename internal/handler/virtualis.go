@@ -96,30 +96,11 @@ func (h *Handler) InstancePower(c *gin.Context) {
 	// Normalize camelCase to snake_case for service compatibility.
 	action = normalizeAction(action)
 
-	// If reinstall carries an explicit image_id, update the instance record first.
-	if action == "reinstall" && req.ImageID != nil {
-		// Persist new image association before reinstall so driver picks correct image.
-		// We do a direct DB update; failures are reported to caller.
-		inst, err := h.virtualis().GetInstance(id)
-		if err != nil {
-			respond(c, nil, err)
-			return
-		}
-		// Validate image exists.
-		if _, err := h.virtualis().GetImage(*req.ImageID); err != nil {
-			respond(c, nil, err)
-			return
-		}
-		// Update instance's image_id.
-		if inst.ImageID == nil || *inst.ImageID != *req.ImageID {
-			if err := h.db().Model(&model.Instance{}).Where("id = ?", id).Update("image_id", req.ImageID).Error; err != nil {
-				respond(c, nil, err)
-				return
-			}
-		}
-	}
-
-	item, err := h.virtualis().PowerInstance(c.Request.Context(), id, action)
+	// The optional reinstall image is passed to the service instead of being
+	// written here: a direct DB write before the lifecycle fence let rejected
+	// requests (busy 409 / reinstall-disabled 403) still mutate the image
+	// association of an in-flight recovery.
+	item, err := h.virtualis().PowerInstance(c.Request.Context(), id, action, req.ImageID, c.GetHeader(levisOperationIDHeader))
 	respond(c, item, err)
 }
 
@@ -338,7 +319,13 @@ func (h *Handler) InstanceVNCWebSocketByTicket(c *gin.Context) {
 
 // relayVNC 是两条 ws 入口共用的中继主体：鉴权（会话 / 短票）由调用方完成。
 func (h *Handler) relayVNC(c *gin.Context, id uint, instance *model.Instance) {
-	if instance.Agent == nil || instance.Agent.Endpoint == "" || instance.Agent.Token == "" {
+	// Plaintext agent tokens now live only in the process memory cache
+	// (populated by heartbeats), so resolve the RPC token here.
+	var agentToken string
+	if instance.Agent != nil && instance.Agent.Endpoint != "" {
+		agentToken, _ = h.agents().RPCToken(instance.Agent.ID)
+	}
+	if instance.Agent == nil || instance.Agent.Endpoint == "" || agentToken == "" {
 		Conflict(c, "被控节点没有可用的 VNC 连接")
 		return
 	}
@@ -359,12 +346,12 @@ func (h *Handler) relayVNC(c *gin.Context, id uint, instance *model.Instance) {
 		agentURL.Scheme = "wss"
 	}
 	query := url.Values{}
-	query.Set("token", instance.Agent.Token)
+	query.Set("token", agentToken)
 	query.Set("name", instance.Name)
 	query.Set("driver", instance.Driver)
 	agentURL.RawQuery = query.Encode()
 	header := http.Header{}
-	header.Set("X-Agent-Token", instance.Agent.Token)
+	header.Set("X-Agent-Token", agentToken)
 
 	dialer := websocket.Dialer{ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10, HandshakeTimeout: 10 * time.Second}
 	agent, resp, err := dialer.Dial(agentURL.String(), header)
