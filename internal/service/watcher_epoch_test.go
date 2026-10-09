@@ -14,27 +14,29 @@ import (
 
 // REV-WATCHER-EPOCH: a slow watchSSHReady status reply captured before a
 // same-node reinstall must not mark the NEW guest SSH-ready. The old
-// condition (busy_operation='' AND agent_id unchanged) is an ABA: after the
-// reinstall completes and releases the fence, busy is '' again and the
+// condition (busy_operation=” AND agent_id unchanged) is an ABA: after the
+// reinstall completes and releases the fence, busy is ” again and the
 // agent is the same, so the stale reply overwrites the new guest's
 // ssh_ready=false with the OLD guest's true.
 func TestWatcherDoesNotClobberReinstalledGuest(t *testing.T) {
 	var mu sync.Mutex
 	blockStatus := make(chan struct{})
 	statusEntered := make(chan struct{})
+	// enteredOnce guards the single close: the handler goroutine closes it and
+	// flips the flag under mu, so the main goroutine's receive never races
+	// with a concurrent nil-out of the channel variable.
+	var enteredOnce bool
 	f := newLifecycleFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/status") {
 			// Old watcher's Status RPC in flight.
 			mu.Lock()
-			entered := statusEntered
+			shouldSignal := !enteredOnce
+			enteredOnce = true
 			mu.Unlock()
-			if entered != nil {
-				close(entered)
-				mu.Lock()
-				statusEntered = nil
-				mu.Unlock()
-				<-blockStatus
+			if shouldSignal {
+				close(statusEntered)
 			}
+			<-blockStatus
 			inst := decodeLifecycleRequest(t, r)
 			inst.SSHReady = true
 			inst.Status = model.InstanceStatusRunning

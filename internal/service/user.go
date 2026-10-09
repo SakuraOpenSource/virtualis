@@ -103,12 +103,12 @@ func (s *UserService) ChangePassword(userID uint, oldPassword, newPassword strin
 	}
 	user.TouchPassword()
 	return s.db.Model(&model.User{}).Where("id = ?", userID).Updates(map[string]any{
-		"password_hash":      hash,
+		"password_hash":       hash,
 		"password_changed_at": user.PasswordChangedAt,
 		// gorm.Expr keeps the increment atomic inside the same UPDATE as the
 		// hash swap: a concurrent login can never observe the new hash with
 		// the old version (or vice versa).
-		"session_version":    gorm.Expr("session_version + 1"),
+		"session_version": gorm.Expr("session_version + 1"),
 	}).Error
 }
 

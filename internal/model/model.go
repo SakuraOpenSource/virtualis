@@ -113,6 +113,6 @@ func AllModels() []any {
 // comparison on a UTC+offset host would resurrect revoked sessions hours
 // before their expiry.
 type RevokedToken struct {
-	JTI      string    `gorm:"primaryKey;size:64" json:"jti"`
+	JTI       string    `gorm:"primaryKey;size:64" json:"jti"`
 	ExpiresAt time.Time `gorm:"index;not null" json:"expires_at"`
 }

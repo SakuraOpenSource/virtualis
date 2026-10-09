@@ -36,7 +36,7 @@ type InstanceOperation struct {
 
 // Instance operation record states.
 const (
-	OperationStateRunning    = "running"
-	OperationStateSucceeded  = "succeeded"
-	OperationStateFailed     = "failed"
+	OperationStateRunning   = "running"
+	OperationStateSucceeded = "succeeded"
+	OperationStateFailed    = "failed"
 )

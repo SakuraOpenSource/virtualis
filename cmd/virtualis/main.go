@@ -97,9 +97,9 @@ func resetAdminPassword(dataDir string) error {
 	// same-second sessions and pre-upgrade tokens without a sess_ver claim.
 	changed := time.Now().UTC()
 	if err := db.Model(&model.User{}).Where("id = ?", user.ID).Updates(map[string]any{
-		"password_hash":     hash,
+		"password_hash":       hash,
 		"password_changed_at": changed,
-		"session_version":   gorm.Expr("session_version + 1"),
+		"session_version":     gorm.Expr("session_version + 1"),
 	}).Error; err != nil {
 		return err
 	}
