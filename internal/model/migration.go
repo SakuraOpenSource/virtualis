@@ -9,6 +9,7 @@ type Migration struct {
 	SourceAgentID     uint   `json:"source_agent_id"`
 	TargetAgentID     uint   `json:"target_agent_id"`
 	TargetVPCID       *uint  `gorm:"index" json:"target_vpc_id"`
+	SourceVPCID       *uint  `gorm:"index" json:"source_vpc_id,omitempty"`
 	TargetPoolEntryID *uint  `json:"target_pool_entry_id"`
 	Stage             string `gorm:"size:32;index" json:"stage"`
 	SourceJSON        string `gorm:"type:text" json:"-"`

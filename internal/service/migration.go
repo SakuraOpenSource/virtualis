@@ -14,12 +14,19 @@ type MigrationInput struct {
 	VPCID         *uint                `json:"vpc_id,omitempty"`
 	IPPoolEntryID *uint                `json:"ip_pool_entry_id,omitempty"`
 	Network       *model.NetworkConfig `json:"network,omitempty"`
+	// CallerRef carries the upstream correlation id (X-Levis-Operation-ID)
+	// as a durable idempotency key. Set by the transport layer only.
+	CallerRef string `json:"-"`
 }
 
 func (s *VirtualisService) MigrateInstance(ctx context.Context, id uint, req MigrationInput) (result *model.Instance, err error) {
-	guard, err := s.beginOperation(ctx, id, "migrate")
+	guard, err := s.beginOperationWithRef(ctx, id, "migrate", req.CallerRef)
 	if err != nil {
 		return nil, err
+	}
+	if guard.replay {
+		// Idempotent retry of a completed migration.
+		return s.GetInstance(id)
 	}
 	defer guard.finishInstance(&err, &result)
 	ctx, cancel := context.WithTimeout(ctx, recoveryTimeout)
@@ -128,7 +135,11 @@ func (s *VirtualisService) MigrateInstance(ctx context.Context, id uint, req Mig
 	}
 	target.NATMappings = nil
 	sourceJSON, _ := json.Marshal(toWireInstance(source, source.Image))
-	migration := &model.Migration{InstanceID: id, OperationID: guard.token, SourceAgentID: *source.AgentID, TargetAgentID: targetAgent.ID, TargetVPCID: req.VPCID, TargetPoolEntryID: req.IPPoolEntryID, SourceJSON: string(sourceJSON), Stage: "reserved"}
+	// SourceVPCID reserves the source network across the whole migration: the
+	// DB switch clears Instance.vpc_id before the source delete is confirmed,
+	// and a fenced migration may still need its source runtime (and therefore
+	// its source VPC) for manual recovery. DeleteVPC consults it.
+	migration := &model.Migration{InstanceID: id, OperationID: guard.token, SourceAgentID: *source.AgentID, TargetAgentID: targetAgent.ID, TargetVPCID: req.VPCID, SourceVPCID: source.VPCID, TargetPoolEntryID: req.IPPoolEntryID, SourceJSON: string(sourceJSON), Stage: "reserved"}
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		if req.VPCID != nil {
 			if e := reserveVPCReference(tx, *req.VPCID); e != nil {
@@ -262,7 +273,7 @@ func (s *VirtualisService) MigrateInstance(ctx context.Context, id uint, req Mig
 		return nil, err
 	}
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&model.Instance{}).Where("id = ? AND agent_id = ? AND busy_operation = ?", id, *source.AgentID, guard.token).Updates(map[string]any{"agent_id": targetAgent.ID, "vpc_id": req.VPCID, "network": string(networkJSON), "ip": primaryConfiguredIP(target.Network), "observed_ip": "", "ssh_ready": false, "status": model.InstanceStatusStopped})
+		res := tx.Model(&model.Instance{}).Where("id = ? AND agent_id = ? AND busy_operation = ?", id, *source.AgentID, guard.token).Updates(map[string]any{"agent_id": targetAgent.ID, "vpc_id": req.VPCID, "network": string(networkJSON), "ip": primaryConfiguredIP(target.Network), "observed_ip": "", "ssh_ready": false, "status": model.InstanceStatusStopped, "lifecycle_generation": gorm.Expr("lifecycle_generation + 1")})
 		if res.Error != nil {
 			return res.Error
 		}
